@@ -24,6 +24,17 @@ def render(state=None, services=None):
 
     st.write(f"**Veri Kaynağı:** `{kpis['member']}` (artefact zip içi)")
 
+    with st.expander("🔎 Veri Tanılama", expanded=False):
+        members = core_data.list_members()
+        st.write("Bulunan Parquet dosyaları:", members[:20])
+        if members:
+            sel = st.selectbox("Bir dosya seç ve şemasını göster", members, index=members.index(kpis["member"]) if kpis["member"] in members else 0)
+            try:
+                cols = core_data._read_schema(sel)  # sadece debug
+                st.write(f"**{sel}** şema:", cols)
+            except Exception as e:
+                st.warning(f"Şema okunamadı: {e}")
+    
     st.markdown("### Hızlı Erişim")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
