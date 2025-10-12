@@ -8,6 +8,24 @@ import pyarrow.dataset as ds
 import streamlit as st
 from config.settings import ARTIFACT_ZIP, DEFAULT_PARQUET_MEMBER
 
+LEVEL_MAP = {
+    "very high": 3, "vh": 3,
+    "high": 2, "h": 2,
+    "medium": 1, "med": 1, "m": 1,
+    "low": 0, "l": 0,
+}
+
+def _coerce_risk_level(s: pd.Series) -> pd.Series:
+    """risk_level'i güvenle numerik'e çevirir; metinleri LEVEL_MAP ile mapler."""
+    if s.dtype != "O" and pd.api.types.is_numeric_dtype(s):
+        return pd.to_numeric(s, errors="coerce")
+    s_str = s.astype(str).str.strip().str.lower()
+    num = pd.to_numeric(s_str, errors="coerce")
+    if num.notna().any():
+        return num
+    return s_str.map(LEVEL_MAP).astype("float32")
+
+
 # UI tarafında beklediğimiz ana sütunlar
 REQUIRED_COLS = ["geoid","lat","lon","timestamp","risk_score","risk_level","pred_expected"]
 
@@ -170,7 +188,8 @@ def sample_for_map(limit: int = 50000) -> pd.DataFrame:
     member = _pick_best_member()
     if not member:
         return pd.DataFrame(columns=REQUIRED_COLS)
-
+    if "risk_score" in df.columns:
+        df["risk_score"] = pd.to_numeric(df["risk_score"], errors="coerce")
     df = load_parquet(member, columns=["geoid","lat","lon","timestamp","risk_score","risk_level","pred_expected"])
     if df.empty:
         return df
