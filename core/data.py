@@ -8,6 +8,7 @@ import pyarrow.dataset as ds
 import streamlit as st
 from config.settings import ARTIFACT_ZIP, DEFAULT_PARQUET_MEMBER
 
+# --- Risk level normalizasyon yardımcıları ---
 LEVEL_MAP = {
     "very high": 3, "vh": 3,
     "high": 2, "h": 2,
@@ -17,7 +18,7 @@ LEVEL_MAP = {
 
 def _coerce_risk_level(s: pd.Series) -> pd.Series:
     """risk_level'i güvenle numerik'e çevirir; metinleri LEVEL_MAP ile mapler."""
-    if s.dtype != "O" and pd.api.types.is_numeric_dtype(s):
+    if pd.api.types.is_numeric_dtype(s):
         return pd.to_numeric(s, errors="coerce")
     s_str = s.astype(str).str.strip().str.lower()
     num = pd.to_numeric(s_str, errors="coerce")
@@ -25,6 +26,16 @@ def _coerce_risk_level(s: pd.Series) -> pd.Series:
         return num
     return s_str.map(LEVEL_MAP).astype("float32")
 
+def _risk_level_high_rate(df: pd.DataFrame, risk_col: str | None) -> float:
+    """Önce risk_level'i sayısallaştır, yoksa risk_score eşiğine düş."""
+    if "risk_level" in df.columns:
+        rl = _coerce_risk_level(df["risk_level"])
+        if rl.notna().any():
+            return float((rl >= 2).mean())
+    if risk_col and risk_col in df.columns:
+        rv = pd.to_numeric(df[risk_col], errors="coerce")
+        return float((rv >= 0.7).mean())
+    return 0.0
 
 # UI tarafında beklediğimiz ana sütunlar
 REQUIRED_COLS = ["geoid","lat","lon","timestamp","risk_score","risk_level","pred_expected"]
@@ -54,7 +65,6 @@ def _read_schema(member_name: str) -> List[str]:
         md = pq.read_metadata(tmp_path)
         return [md.schema.column(i).name for i in range(md.num_columns)]
     except Exception:
-        # fallback: dataset schema
         try:
             return ds.dataset(tmp_path, format="parquet").schema.names
         finally:
@@ -95,8 +105,8 @@ def load_parquet(member_name: str,
     ZIP içindeki tek bir parquet dosyasını okur (sütun seçimi + predicate pushdown).
     Şema güvenli: istenen kolonlar dosyada yoksa mevcut olanlarla kesişimi alır.
     """
-    zip_md5 = _md5(ARTIFACT_ZIP)
-    _ = (zip_md5, member_name, tuple(columns or []), str(row_filter))  # cache key için
+    # cache key implicit: args + kwargs + code hash
+    _ = (_md5(ARTIFACT_ZIP), member_name, tuple(columns or []), str(row_filter))
 
     # Şema oku ve kolonları eşle
     available = _read_schema(member_name)
@@ -140,44 +150,41 @@ def get_latest_kpis() -> dict:
     Esnek KPI: Kolon isimleri farklıysa da hesaplar.
     - last_update: timestamp/ts/datetime'dan
     - avg_risk: risk_score/risk/score/prob'dan
-    - high_rate: risk_level yoksa risk_score > eşik (0.7) varsayılanı ile
+    - high_rate: risk_level (>=2) ya da risk_score >= 0.7 fallback
     """
     member = _pick_best_member()
     if not member:
         return {"rows": 0, "last_update": "—", "avg_risk": 0.0, "high_rate": 0.0, "member": "N/A"}
 
-    # Şema esnekliği için tam listeyi isteyelim; sonradan seçeriz
     df = load_parquet(member, columns=[
         "timestamp","risk_score","risk_level","pred_expected","geoid","lat","lon"
     ])
-
     if df.empty:
         return {"rows": 0, "last_update": "—", "avg_risk": 0.0, "high_rate": 0.0, "member": member}
 
     # Zaman damgasını normalize et (saniye/ms)
+    last_ts = "—"
     if "timestamp" in df.columns:
         ts = pd.to_datetime(df["timestamp"], unit="s", errors="coerce")
-        if ts.isna().all():  # belki ms olabilir
+        if ts.isna().all():  # ms olabilir
             ts = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce")
-        last_ts = ts.max()
-    else:
-        last_ts = pd.NaT
+        if ts.notna().any():
+            last_ts = ts.max().strftime("%Y-%m-%d %H:%M")
 
-    # risk_score eşleme
+    # risk_score eşleme ve ortalama
     risk_col = next((c for c in ["risk_score","risk","score","prob"] if c in df.columns), None)
-    avg_risk = float(df[risk_col].mean()) if risk_col else 0.0
-
-    # yüksek risk oranı: risk_level varsa ondan; yoksa eşikten
-    if "risk_level" in df.columns:
-        high_rate = float((df["risk_level"] >= 2).mean())
-    elif risk_col:
-        high_rate = float((df[risk_col] >= 0.7).mean())
+    if risk_col:
+        rv = pd.to_numeric(df[risk_col], errors="coerce")
+        avg_risk = float(rv.mean())
     else:
-        high_rate = 0.0
+        avg_risk = 0.0
+
+    # yüksek risk oranı (güvenli hesap)
+    high_rate = _risk_level_high_rate(df, risk_col)
 
     return {
         "rows": int(len(df)),
-        "last_update": (last_ts.strftime("%Y-%m-%d %H:%M") if pd.notna(last_ts) else "—"),
+        "last_update": last_ts,
         "avg_risk": round(avg_risk, 3),
         "high_rate": round(high_rate, 3),
         "member": member
@@ -188,11 +195,14 @@ def sample_for_map(limit: int = 50000) -> pd.DataFrame:
     member = _pick_best_member()
     if not member:
         return pd.DataFrame(columns=REQUIRED_COLS)
-    if "risk_score" in df.columns:
-        df["risk_score"] = pd.to_numeric(df["risk_score"], errors="coerce")
+
     df = load_parquet(member, columns=["geoid","lat","lon","timestamp","risk_score","risk_level","pred_expected"])
     if df.empty:
         return df
+
+    # risk_score'u numerik'e çevir (downsample için)
+    if "risk_score" in df.columns:
+        df["risk_score"] = pd.to_numeric(df["risk_score"], errors="coerce")
 
     # timestamp normalizasyonu
     if "timestamp" in df.columns:
@@ -206,8 +216,9 @@ def sample_for_map(limit: int = 50000) -> pd.DataFrame:
         if "risk_score" in df.columns:
             top = df.nlargest(limit//2, "risk_score")
             rest = df.drop(top.index, errors="ignore")
-            if len(rest) > (limit - len(top)):
-                rest = rest.sample(limit - len(top), random_state=42)
+            remain = limit - len(top)
+            if len(rest) > remain:
+                rest = rest.sample(remain, random_state=42)
             df = pd.concat([top, rest], ignore_index=True)
         else:
             df = df.sample(limit, random_state=42)
