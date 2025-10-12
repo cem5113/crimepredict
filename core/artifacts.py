@@ -1,4 +1,3 @@
-# core/artifacts.py
 from __future__ import annotations
 import os, time, hashlib, requests
 from pathlib import Path
