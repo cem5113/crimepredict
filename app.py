@@ -2,6 +2,8 @@
 import streamlit as st
 from pathlib import Path
 import importlib.util, sys
+from core.data_boot import configure_artifact_env
+configure_artifact_env()
 
 st.set_page_config(page_title="Suç Tahmini", page_icon="🔎", layout="wide")
 
