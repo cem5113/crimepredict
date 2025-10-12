@@ -1,0 +1,49 @@
+name: Publish Parquet as Latest
+
+on:
+  workflow_run:
+    workflows: ["Full SF Crime Pipeline"]   # Senin ana pipeline adın
+    types: [completed]
+    branches: [main]
+  workflow_dispatch: {}                      # İstersen elle de tetikle
+
+permissions:
+  contents: write        # release yayınlamak için
+  actions: read          # diğer workflow artefact'ını okumak için
+
+jobs:
+  publish:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifact "sf-crime-parquet" from latest successful run
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          workflow: "Full SF Crime Pipeline" # veya workflow dosya adı: full_sf_crime_pipeline.yml
+          workflow_conclusion: success
+          branch: main
+          name: sf-crime-parquet            # Actions sayfasındaki artefact ismi
+          path: dist
+
+      - name: Show downloaded files
+        run: ls -lah dist && ls -lah dist/* || true
+
+      # Artefact bazen zaten ZIP dosyasıdır; değilse klasörü zip'le
+      - name: Ensure single zip named sf-crime-parquet.zip
+        run: |
+          if [ -f "dist/sf-crime-parquet.zip" ]; then
+            echo "ZIP already present."
+          else
+            cd dist
+            zip -r sf-crime-parquet.zip ./*
+            cd -
+          fi
+
+      - name: Publish/Update 'latest' release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Daily Crime Parquet"
+          files: dist/sf-crime-parquet.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
