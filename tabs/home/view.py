@@ -51,11 +51,12 @@ def render(state=None, services=None):
             _goto("reports")
 
     st.markdown("### Şehir Anlık Görünüm")
+    st.caption("Bu ekran, **anlık mekânsal risk yoğunluğunu** hafif bir ısı katmanıyla gösterir. Detaylı katmanlar ve analiz için **Suç Tahmini** sekmesine geçebilirsiniz.")
     df_map = core_data.sample_for_map(limit=50000)
     if df_map.empty:
-        st.info("Harita için veri bulunamadı. Artefact ZIP yolunu `CRIME_ARTIFACT_ZIP` ile ayarlayın.")
-        return
-    deck = mapkit.home_deck(df_map)
-    st.pydeck_chart(deck, use_container_width=True)
+        st.info("Harita için veri bulunamadı. Veri bağlantısı kurulunca ısı katmanı otomatik görünecek.")
+    else:
+        deck = mapkit.home_deck(df_map)
+        st.pydeck_chart(deck, use_container_width=True)
+    st.caption("İpucu: Noktalara geldiğinizde tooltip’te **E[olay]** (beklenen olay) ve risk skoru görünür. Detaylar için 🔮 **Suç Tahmini** sekmesi.")
 
-    st.caption("İpucu: Haritada bir noktaya gelince tooltip’te **E[olay]** (beklenen olay) ve risk skoru görünür.")
