@@ -1,7 +1,7 @@
-# core/mapkit.py
 import pydeck as pdk
 import pandas as pd
 from config.settings import MAP_VIEW
+from pathlib import Path
 
 try:
     from crimepredict.utils.geo import load_geoid_layer
@@ -9,15 +9,18 @@ try:
 except ImportError:
     from utils.geo import load_geoid_layer
     from utils.deck import build_map_fast_deck
-    
+
+
 _geo_df_cache = None
 def _get_geo_df():
+    """GeoJSON verisini cache'li biçimde yükler (her çağrıda tekrar okuma yapmaz)."""
     global _geo_df_cache
     if _geo_df_cache is None:
-        geo_df, _ = load_geoid_layer("data/sf_cells.geojson", key_field="geoid")
+        geo_path = (Path(__file__).resolve().parent.parent / "data" / "sf_cells.geojson").as_posix()
+        geo_df, _ = load_geoid_layer(geo_path, key_field="geoid")
         _geo_df_cache = geo_df
     return _geo_df_cache
-
+    
 def _prep(df: pd.DataFrame) -> pd.DataFrame:
     """Veriyi görselleştirme için güvenli hale getirir."""
     df = df.copy()
