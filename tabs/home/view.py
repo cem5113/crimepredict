@@ -1,7 +1,11 @@
 # tabs/home/view.py
 import streamlit as st
-from crimepredict.core import mapkit
-from crimepredict.core import data as core_data
+try:
+    from crimepredict.core import mapkit
+    from crimepredict.core import data as core_data
+except ImportError:
+    from core import mapkit
+    from core import data as core_data
 
 def _kpi(k, v, help_txt: str = ""):
     st.metric(label=k, value=v, help=help_txt)
