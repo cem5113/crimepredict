@@ -1,3 +1,4 @@
+# crimepredict/tabs/home/__init__.py
 from .view import render
 
 def register():
