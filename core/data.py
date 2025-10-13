@@ -222,5 +222,9 @@ def sample_for_map(limit: int = 50000) -> pd.DataFrame:
             df = pd.concat([top, rest], ignore_index=True)
         else:
             df = df.sample(limit, random_state=42)
-    df = df.replace([float("inf"), -float("inf")], pd.NA).dropna(subset=["lat", "lon"])
+    df = df.replace([float("inf"), -float("inf")], pd.NA).dropna(subset=["lat","lon"])
+    if "risk_score" in df.columns:
+        df["risk_score"] = pd.to_numeric(df["risk_score"], errors="coerce").fillna(0.0).clip(0,1)
+    else:
+        df["risk_score"] = 1.0
     return df
