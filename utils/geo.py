@@ -2,12 +2,17 @@
 from __future__ import annotations
 from pathlib import Path
 from typing import Tuple, List
-from utils.constants import KEY_COL
 import json
 import numpy as np
 import pandas as pd
 
-from utils.constants import KEY_COL
+try:
+    from .constants import KEY_COL
+except Exception:
+    try:
+        from crimepredict.utils.constants import KEY_COL
+    except Exception:
+        from utils.constants import KEY_COL
 
 # ── Varsayılan harita başlangıcı (San Francisco) ─────────────────────────────
 SF_CENTER: Tuple[float, float] = (37.7749, -122.4194)  # (lat, lon)
