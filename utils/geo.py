@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 try:
-    from .constants import KEY_COL
+    from crimepredict.utils.constants import KEY_COL
 except Exception:
     try:
         from crimepredict.utils.constants import KEY_COL
