@@ -222,4 +222,5 @@ def sample_for_map(limit: int = 50000) -> pd.DataFrame:
             df = pd.concat([top, rest], ignore_index=True)
         else:
             df = df.sample(limit, random_state=42)
+    df = df.replace([float("inf"), -float("inf")], pd.NA).dropna(subset=["lat", "lon"])
     return df
