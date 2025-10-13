@@ -3,11 +3,13 @@ import pydeck as pdk
 import pandas as pd
 from config.settings import MAP_VIEW
 
-# Yeni importlar (mevcut utils klasöründen)
-from utils.geo import load_geoid_layer
-from utils.deck import build_map_fast_deck
-
-# GEOID katmanını sadece bir kez oku
+try:
+    from crimepredict.utils.geo import load_geoid_layer
+    from crimepredict.utils.deck import build_map_fast_deck
+except ImportError:
+    from utils.geo import load_geoid_layer
+    from utils.deck import build_map_fast_deck
+    
 _geo_df_cache = None
 def _get_geo_df():
     global _geo_df_cache
