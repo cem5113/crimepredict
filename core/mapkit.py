@@ -3,7 +3,6 @@ import pydeck as pdk
 import pandas as pd
 from config.settings import MAP_VIEW
 
-# Mutlak importlar (paket adıyla)
 from crimepredict.utils.geo import load_geoid_layer
 from crimepredict.utils.deck import build_map_fast_deck
     
