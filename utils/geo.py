@@ -5,6 +5,7 @@ from typing import Tuple, List
 import json
 import numpy as np
 import pandas as pd
+from crimepredict.utils.geo import * 
 
 try:
     from crimepredict.utils.constants import KEY_COL
