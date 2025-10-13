@@ -10,7 +10,6 @@ except ImportError:
     from utils.geo import load_geoid_layer
     from utils.deck import build_map_fast_deck
 
-
 _geo_df_cache = None
 def _get_geo_df():
     """GeoJSON verisini cache'li biçimde yükler (her çağrıda tekrar okuma yapmaz)."""
