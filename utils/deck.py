@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import pydeck as pdk
 from crimepredict.utils.constants import KEY_COL
+from crimepredict.utils.deck import *
 
 _PALETTE = {
     "Çok Düşük":[198,219,239,140],"Düşük":[107,174,214,180],
