@@ -15,6 +15,22 @@ def render(state=None, services=None):
     st.caption("Basit ama etkileyici: Güncel veriden risk haritası, planlama ve raporlar.")
     st.divider()
 
+    from components.last_update import show_last_update_badge
+    from utils.constants import MODEL_VERSION, MODEL_LAST_TRAIN
+
+    kpis = core_data.get_latest_kpis()  # kpis zaten aşağıda da kullanılıyor
+    show_last_update_badge(
+        app_name="SUTAM",
+        data_upto=kpis.get("last_update") or "-",
+        model_version=MODEL_VERSION,
+        last_train=MODEL_LAST_TRAIN,
+        daily_update_hour_sf=19,
+        show_times=True,
+        tz_label="SF",
+        show_actions=True,       # sadece “↻ Yeniden yükle” butonu için
+        on_pipeline_click=None   # diğer butonları boş bırak
+    )
+
     # ── KPI'lar
     col1, col2, col3, col4 = st.columns(4)
     kpis = core_data.get_latest_kpis()
