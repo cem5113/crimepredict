@@ -1,5 +1,7 @@
 # tabs/home/view.py
 import streamlit as st
+
+# --- Güvenli import: hem paketli (crimepredict.*) hem yerel (core.*) destekler ---
 try:
     from crimepredict.core import mapkit
     from crimepredict.core import data as core_data
@@ -7,60 +9,51 @@ except ImportError:
     from core import mapkit
     from core import data as core_data
 
+
 def _kpi(k, v, help_txt: str = ""):
+    """KPI göstergeleri için kısa yardımcı"""
     st.metric(label=k, value=v, help=help_txt)
 
+
 def _goto(tab_key: str):
+    """Sekmeler arasında geçiş (state tabanlı)"""
     st.session_state["__active_tab__"] = tab_key
     st.experimental_rerun()
+
 
 def render(state=None, services=None):
     st.title("Suç Tahmini — Ana Sayfa")
     st.caption("Basit ama etkileyici: Güncel veriden risk haritası, planlama ve raporlar.")
     st.divider()
 
+    # --- ↻ Yeniden yükle butonu ---
     c_reload_l, c_reload_r = st.columns([1, 0.18])
     with c_reload_r:
-        if st.button("↻ Yeniden yükle", use_container_width=True,
-                     help="Cache temizle & sayfayı tazele"):
+        if st.button("↻ Yeniden yükle", use_container_width=True, help="Cache temizle ve sayfayı yenile"):
             try:
-                # Streamlit cache'i temizle (varsa)
                 st.cache_data.clear()
             except Exception:
                 pass
-            # Yeniden çalıştır
             try:
-                st.rerun()  # yeni sürümler
+                st.rerun()
             except AttributeError:
-                st.experimental_rerun() 
+                st.experimental_rerun()
 
-    from components.last_update import show_last_update_badge
-    from utils.constants import MODEL_VERSION, MODEL_LAST_TRAIN
-
-    kpis = core_data.get_latest_kpis()  # kpis zaten aşağıda da kullanılıyor
-    show_last_update_badge(
-        app_name="SUTAM",
-        data_upto=kpis.get("last_update") or "-",
-        model_version=MODEL_VERSION,
-        last_train=MODEL_LAST_TRAIN,
-        daily_update_hour_sf=19,
-        show_times=True,
-        tz_label="SF",
-        show_actions=True,       # sadece “↻ Yeniden yükle” butonu için
-        on_pipeline_click=None   # diğer butonları boş bırak
-    )
-
-    # ── KPI'lar
+    # --- KPI'lar ---
     col1, col2, col3, col4 = st.columns(4)
     kpis = core_data.get_latest_kpis()
-    with col1: _kpi("Kayıt", f"{kpis['rows']:,}")
-    with col2: _kpi("Son Güncelleme", kpis["last_update"])
-    with col3: _kpi("Ortalama Risk", kpis["avg_risk"])
-    with col4: _kpi("Yüksek Risk Oranı", kpis["high_rate"])
+    with col1:
+        _kpi("Kayıt", f"{kpis['rows']:,}")
+    with col2:
+        _kpi("Son Güncelleme", kpis["last_update"])
+    with col3:
+        _kpi("Ortalama Risk", kpis["avg_risk"])
+    with col4:
+        _kpi("Yüksek Risk Oranı", kpis["high_rate"])
 
     st.write(f"**Veri Kaynağı:** `{kpis['member']}` (artefact zip içi)")
 
-    # ── Veri Tanılama
+    # --- Veri Tanılama ---
     with st.expander("🔎 Veri Tanılama", expanded=False):
         members = core_data.list_members()
         st.write("Bulunan Parquet dosyaları:", members[:20])
@@ -71,12 +64,12 @@ def render(state=None, services=None):
                 index=members.index(kpis["member"]) if kpis["member"] in members else 0,
             )
             try:
-                cols = core_data._read_schema(sel)  # sadece debug
+                cols = core_data._read_schema(sel)
                 st.write(f"**{sel}** şema:", cols)
             except Exception as e:
                 st.warning(f"Şema okunamadı: {e}")
 
-    # ── Kısayollar
+    # --- Hızlı Erişim Kısayolları ---
     st.markdown("### Hızlı Erişim")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -92,7 +85,7 @@ def render(state=None, services=None):
         if st.button("🧾 Raporlar", use_container_width=True):
             _goto("reports")
 
-    # ── Harita
+    # --- Şehir Haritası ---
     st.markdown("### Şehir Anlık Görünüm")
     st.caption(
         "Bu ekran, **renkli risk katmanı + ısı katmanı** ile mekânsal yoğunluğu gösterir. "
@@ -103,7 +96,6 @@ def render(state=None, services=None):
     if df_map.empty:
         st.info("Harita için veri bulunamadı. Veri bağlantısı kurulunca katmanlar otomatik görünecek.")
     else:
-        # core/mapkit.home_deck artık utils.deck.build_map_fast_deck ile çalışıyor
         deck = mapkit.home_deck(df_map)
         st.pydeck_chart(deck, use_container_width=True)
 
