@@ -3,75 +3,70 @@ import pydeck as pdk
 import pandas as pd
 from config.settings import MAP_VIEW
 
-def _base_view():
-    return pdk.ViewState(
-        latitude=MAP_VIEW["lat"], longitude=MAP_VIEW["lon"],
-        zoom=MAP_VIEW["zoom"], pitch=MAP_VIEW["pitch"], bearing=MAP_VIEW["bearing"]
-    )
+# Yeni importlar (mevcut utils klasöründen)
+from utils.geo import load_geoid_layer
+from utils.deck import build_map_fast_deck
+
+# GEOID katmanını sadece bir kez oku
+_geo_df_cache = None
+def _get_geo_df():
+    global _geo_df_cache
+    if _geo_df_cache is None:
+        geo_df, _ = load_geoid_layer("data/sf_cells.geojson", key_field="geoid")
+        _geo_df_cache = geo_df
+    return _geo_df_cache
 
 def _prep(df: pd.DataFrame) -> pd.DataFrame:
-    # Görselleştirme için güvenli hale getir
-    need = ["geoid","lat","lon","risk_score","pred_expected"]
+    """Veriyi görselleştirme için güvenli hale getirir."""
     df = df.copy()
-    for c in ["lat","lon"]:
+    for c in ["lat", "lon"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
-    df = df.dropna(subset=["lat","lon"])
+    df = df.dropna(subset=["lat", "lon"])
+
+    # risk_score alanı yoksa veya boşsa 0–1 aralığına çek
     if "risk_score" in df.columns:
-        df["risk_score"] = pd.to_numeric(df["risk_score"], errors="coerce").fillna(0).clip(0, 1)
+        df["risk_score"] = pd.to_numeric(df["risk_score"], errors="coerce").fillna(0.0).clip(0, 1)
     else:
         df["risk_score"] = 1.0
-    # pydeck/tooltip alanları yoksa boş string ver
-    for c in need:
-        if c not in df.columns:
-            df[c] = ""
+
+    # E[olay] yoksa dummy ekle
+    if "pred_expected" not in df.columns:
+        df["pred_expected"] = 0.0
+
+    # geoid eksikse boş string
+    if "geoid" not in df.columns:
+        df["geoid"] = ""
     return df
 
-def heatmap_layer(df: pd.DataFrame, radius_px: int = 70):
-    return pdk.Layer(
-        "HeatmapLayer",
-        data=df,
-        get_position="[lon, lat]",
-        get_weight="risk_score",
-        radiusPixels=radius_px,
-        aggregation="SUM",
-        pickable=True,          # <-- tooltip için
-        threshold=0.02,         # çok sönük kalmasın
-        intensity=1.0,
-    )
 
-def hit_layer_for_tooltip(df: pd.DataFrame, size_px: int = 8):
-    # Görünmez nokta katmanı; sadece hover/tooltip için
-    return pdk.Layer(
-        "ScatterplotLayer",
-        data=df,
-        get_position="[lon, lat]",
-        get_fill_color=[0, 0, 0, 0],
-        get_line_color=[0, 0, 0, 0],
-        pickable=True,
-        radiusMinPixels=size_px,   # piksel bazlı
-    )
-
-def scatter_layer(df: pd.DataFrame, size_px: int = 5):
-    # İstersen görünür noktalar
-    return pdk.Layer(
-        "ScatterplotLayer",
-        data=df,
-        get_position="[lon, lat]",
-        get_fill_color=[255, 140, 0, 120],
-        get_line_color=[255, 255, 255, 60],
-        pickable=True,
-        radiusMinPixels=size_px,   # <- get_radius yerine
-    )
-
-def home_deck(df: pd.DataFrame):
+def home_deck(df: pd.DataFrame) -> pdk.Deck:
+    """
+    Şehir anlık görünüm: risk katmanı + ısı katmanı + hotspotlar.
+    """
     df = _prep(df)
-    layers = [heatmap_layer(df), hit_layer_for_tooltip(df)]
-    # Veriniz azsa noktaları da göster
-    if len(df) < 5000:
-        layers.append(scatter_layer(df, size_px=5))
+    geo_df = _get_geo_df()
 
-    tooltip = {
-        "html": "<b>GEOID:</b> {geoid}<br/><b>Risk:</b> {risk_score}<br/><b>E[olay]:</b> {pred_expected}",
-        "style": {"backgroundColor": "rgba(30,30,30,0.9)", "color": "white"}
+    # Heatmap için nokta seti (risk_score -> weight)
+    pts = df.rename(columns={"risk_score": "weight"})
+    if "weight" not in pts.columns:
+        pts["weight"] = 1.0
+
+    # Başlangıç görünümü (MAP_VIEW ayarlarından)
+    view = {
+        "lat": MAP_VIEW["lat"],
+        "lon": MAP_VIEW["lon"],
+        "zoom": MAP_VIEW["zoom"],
     }
-    return pdk.Deck(layers=layers, initial_view_state=_base_view(), tooltip=tooltip)
+
+    # utils.deck.build_map_fast_deck fonksiyonunu kullan
+    deck = build_map_fast_deck(
+        df_agg=df,                    # GEOID bazlı risk verisi
+        geo_df=geo_df,                # sf_cells.geojson centroid/polygon
+        show_risk_layer=True,         # renkli risk katmanı
+        show_temp_hotspot=True,       # ısı katmanı (HeatmapLayer)
+        temp_hotspot_points=pts[["lat", "lon", "weight"]],
+        show_hotspot=True,            # %90 üzeri koyu kırmızı marker
+        map_style="mapbox://styles/mapbox/dark-v11",  # koyu tema
+        initial_view=view,
+    )
+    return deck
