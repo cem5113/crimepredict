@@ -3,8 +3,12 @@ import pydeck as pdk
 import pandas as pd
 from config.settings import MAP_VIEW
 
-from crimepredict.utils.geo import load_geoid_layer
-from crimepredict.utils.deck import build_map_fast_deck
+try:
+    from crimepredict.utils.geo import load_geoid_layer
+    from crimepredict.utils.deck import build_map_fast_deck
+except ImportError:
+    from utils.geo import load_geoid_layer
+    from utils.deck import build_map_fast_deck
     
 _geo_df_cache = None
 def _get_geo_df():
