@@ -1,4 +1,14 @@
-streamlit
-pandas
-pyarrow
-pydeck
+# UI
+streamlit>=1.30.0
+pydeck>=0.9.0
+
+# Veri
+pandas>=2.1.0
+pyarrow>=15.0.0
+numpy>=1.26.0
+
+# Genel
+typing-extensions>=4.9.0
+
+# Opsiyonel ama yararlı (hata mesajları ve renkli çıktı için)
+rich>=13.0.0
