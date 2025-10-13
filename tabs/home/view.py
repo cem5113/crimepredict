@@ -3,7 +3,7 @@ import streamlit as st
 from core import data as core_data
 from core import mapkit
 
-def _kpi(k, v, help_txt=""):
+def _kpi(k, v, help_txt: str = ""):
     st.metric(label=k, value=v, help=help_txt)
 
 def _goto(tab_key: str):
@@ -15,6 +15,7 @@ def render(state=None, services=None):
     st.caption("Basit ama etkileyici: Güncel veriden risk haritası, planlama ve raporlar.")
     st.divider()
 
+    # ── KPI'lar
     col1, col2, col3, col4 = st.columns(4)
     kpis = core_data.get_latest_kpis()
     with col1: _kpi("Kayıt", f"{kpis['rows']:,}")
@@ -24,17 +25,23 @@ def render(state=None, services=None):
 
     st.write(f"**Veri Kaynağı:** `{kpis['member']}` (artefact zip içi)")
 
+    # ── Veri Tanılama
     with st.expander("🔎 Veri Tanılama", expanded=False):
         members = core_data.list_members()
         st.write("Bulunan Parquet dosyaları:", members[:20])
         if members:
-            sel = st.selectbox("Bir dosya seç ve şemasını göster", members, index=members.index(kpis["member"]) if kpis["member"] in members else 0)
+            sel = st.selectbox(
+                "Bir dosya seç ve şemasını göster",
+                members,
+                index=members.index(kpis["member"]) if kpis["member"] in members else 0,
+            )
             try:
                 cols = core_data._read_schema(sel)  # sadece debug
                 st.write(f"**{sel}** şema:", cols)
             except Exception as e:
                 st.warning(f"Şema okunamadı: {e}")
-    
+
+    # ── Kısayollar
     st.markdown("### Hızlı Erişim")
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -50,13 +57,21 @@ def render(state=None, services=None):
         if st.button("🧾 Raporlar", use_container_width=True):
             _goto("reports")
 
+    # ── Harita
     st.markdown("### Şehir Anlık Görünüm")
-    st.caption("Bu ekran, **anlık mekânsal risk yoğunluğunu** hafif bir ısı katmanıyla gösterir. Detaylı katmanlar ve analiz için **Suç Tahmini** sekmesine geçebilirsiniz.")
-    df_map = core_data.sample_for_map(limit=50000)
+    st.caption(
+        "Bu ekran, **renkli risk katmanı + ısı katmanı** ile mekânsal yoğunluğu gösterir. "
+        "Detaylı katmanlar ve analiz için **Suç Tahmini** sekmesine geçebilirsiniz."
+    )
+
+    df_map = core_data.sample_for_map(limit=50_000)
     if df_map.empty:
-        st.info("Harita için veri bulunamadı. Veri bağlantısı kurulunca ısı katmanı otomatik görünecek.")
+        st.info("Harita için veri bulunamadı. Veri bağlantısı kurulunca katmanlar otomatik görünecek.")
     else:
+        # core/mapkit.home_deck artık utils.deck.build_map_fast_deck ile çalışıyor
         deck = mapkit.home_deck(df_map)
         st.pydeck_chart(deck, use_container_width=True)
-    st.caption("İpucu: Noktalara geldiğinizde tooltip’te **E[olay]** (beklenen olay) ve risk skoru görünür. Detaylar için 🔮 **Suç Tahmini** sekmesi.")
 
+    st.caption(
+        "İpucu: Hover/tıklamada tooltip’te **GEOID**, mahalle adı, **E[olay]** (beklenen olay) ve risk seviyesi görünür."
+    )
