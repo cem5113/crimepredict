@@ -1,16 +1,12 @@
-# utils/geo.py
+# crimepredict/utils/geo.py
 from __future__ import annotations
 from pathlib import Path
 from typing import Tuple, List
 import json
 import numpy as np
 import pandas as pd
-from crimepredict.utils.geo import * 
 
-try:
-    from crimepredict.utils.constants import KEY_COL
-except ImportError:
-    from utils.constants import KEY_COL
+from crimepredict.utils.constants import KEY_COL  # ⬅️ mutlak import
 
 # ── Varsayılan harita başlangıcı (San Francisco) ─────────────────────────────
 SF_CENTER: Tuple[float, float] = (37.7749, -122.4194)  # (lat, lon)
@@ -34,7 +30,6 @@ def polygon_centroid(lonlat_loop: List[List[float]] | List[Tuple[float, float]])
     """Basit poligon centroid (lon, lat) → (Cx, Cy). İlk/son nokta kapalıysa sonu atla."""
     x, y = zip(*lonlat_loop)
     A = Cx = Cy = 0.0
-    # Kapanmış halkada son nokta == ilk nokta olur; -1'e kadar dönmek yeterli
     rng = range(len(lonlat_loop) - 1) if lonlat_loop[0] == lonlat_loop[-1] else range(len(lonlat_loop))
     for i in rng:
         j = (i + 1) % len(lonlat_loop)
@@ -55,7 +50,6 @@ def load_geoid_layer(path: str = "data/sf_cells.geojson", key_field: str = KEY_C
     """
     p = Path(path)
     if not p.exists():
-        # Boş dönüş: app/map güvenli çalışır
         return pd.DataFrame(columns=[key_field, "centroid_lon", "centroid_lat"]), []
 
     gj = json.loads(p.read_text(encoding="utf-8"))
@@ -63,7 +57,6 @@ def load_geoid_layer(path: str = "data/sf_cells.geojson", key_field: str = KEY_C
 
     for feat in gj.get("features", []):
         props = feat.get("properties", {}) or {}
-        # GEOID alanı olası isimlerden toplanır
         geoid = str(
             props.get(key_field)
             or props.get(key_field.upper())
@@ -75,7 +68,6 @@ def load_geoid_layer(path: str = "data/sf_cells.geojson", key_field: str = KEY_C
         if not geoid:
             continue
 
-        # Centroid varsa kullan; yoksa geometri'den hesapla
         lon = props.get("centroid_lon")
         lat = props.get("centroid_lat")
         if lon is None or lat is None:
@@ -86,14 +78,11 @@ def load_geoid_layer(path: str = "data/sf_cells.geojson", key_field: str = KEY_C
             elif gtype == "MultiPolygon":
                 ring = geom.get("coordinates", [[[]]])[0][0]
             else:
-                # Desteklenmeyen geometri—atla
                 continue
             lon, lat = polygon_centroid(ring)
 
-        # Kayıt satırı
         rows.append({key_field: geoid, "centroid_lon": float(lon), "centroid_lat": float(lat)})
 
-        # Feature properties.id garanti et + centroid'leri ekle (popup/tooltip için faydalı)
         props["id"] = geoid
         props.setdefault("centroid_lon", float(lon))
         props.setdefault("centroid_lat", float(lat))
@@ -120,17 +109,11 @@ def _extract_latlon_from_ret(ret) -> Tuple[float, float] | None:
     lc = ret.get("last_clicked")
     if lc is None:
         return None
-
-    # Çeşitli olası şekiller:
-    # 1) [lat, lon]
     if isinstance(lc, (list, tuple)) and len(lc) >= 2:
         return float(lc[0]), float(lc[1])
-
-    # 2) {"lat":..., "lng":...} veya {"lat":..., "lon":...}
     if isinstance(lc, dict):
         if "lat" in lc and ("lng" in lc or "lon" in lc):
             return float(lc["lat"]), float(lc.get("lng", lc.get("lon")))
-        # 3) {"latlng": {"lat":..., "lng":...}}
         ll = lc.get("latlng")
         if isinstance(ll, (list, tuple)) and len(ll) >= 2:
             return float(ll[0]), float(ll[1])
@@ -139,10 +122,7 @@ def _extract_latlon_from_ret(ret) -> Tuple[float, float] | None:
     return None
 
 def resolve_clicked_gid(geo_df: pd.DataFrame, ret: dict) -> tuple[str | None, tuple[float, float] | None]:
-    """
-    st_folium ret sözlüğünden tıklanan GEOID'i ve (lat,lon)'u çıkart.
-    Dönüş: (geoid | None, (lat, lon) | None)
-    """
+    """st_folium ret sözlüğünden tıklanan GEOID'i ve (lat,lon)'u çıkart."""
     gid, latlon = None, None
     obj = ret.get("last_object_clicked") if isinstance(ret, dict) else None
 
@@ -156,7 +136,6 @@ def resolve_clicked_gid(geo_df: pd.DataFrame, ret: dict) -> tuple[str | None, tu
             or ""
         ).strip() or None
 
-        # Geometri/koordinat yakalamaya çalış
         geom = obj.get("geometry") or obj.get("feature", {}).get("geometry")
         if isinstance(geom, dict) and geom.get("type") == "Point":
             coords = geom.get("coordinates", [])
@@ -176,13 +155,8 @@ def resolve_clicked_gid(geo_df: pd.DataFrame, ret: dict) -> tuple[str | None, tu
 
     return gid, latlon
 
-# ── Harita başlangıç parametresi (lat, lon, zoom) ─────────────────────────────
 def get_map_init(geo_df: pd.DataFrame | None = None) -> tuple[float, float, int]:
-    """
-    Harita ilk açılış merkezi ve zoom.
-    - Geo veri varsa: centroid’lerin ortalaması
-    - Yoksa: San Francisco (SF_CENTER) + SF_ZOOM
-    """
+    """Harita ilk açılış merkezi ve zoom."""
     if isinstance(geo_df, pd.DataFrame) and not geo_df.empty:
         try:
             lat = float(geo_df["centroid_lat"].mean())
