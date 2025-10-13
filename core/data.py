@@ -211,6 +211,7 @@ def sample_for_map(limit: int = 50000) -> pd.DataFrame:
             ts = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce")
         df["timestamp"] = ts
 
+    # downsample: yüksek risk öncelikli
     if len(df) > limit:
         if "risk_score" in df.columns:
             top = df.nlargest(limit//2, "risk_score")
@@ -222,11 +223,10 @@ def sample_for_map(limit: int = 50000) -> pd.DataFrame:
         else:
             df = df.sample(limit, random_state=42)
 
-    # --- BURADAN İTİBAREN REVİZE ---
-    # sonsuz değerleri temizle
+    # --- GÜVENLİ TEMİZLİK (KeyError önleme) ---
     df = df.replace([float("inf"), -float("inf")], pd.NA)
 
-    # lat/lon sayısallaştır ve varsa bunlara göre dropna yap
+    # lat/lon sayısallaştır; sadece varsa dropna yap
     for c in ("lat", "lon"):
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -235,14 +235,15 @@ def sample_for_map(limit: int = 50000) -> pd.DataFrame:
     if subset:
         df = df.dropna(subset=subset)
     else:
-        # lat/lon yoksa harita çizemeyiz → boş şablon dön
+        # lat/lon hiç yoksa harita çizemeyiz → boş şablon dön
+        import streamlit as st
+        st.warning("Seçilen parquet üyesinde 'lat'/'lon' kolonları bulunamadı; harita veri kümesi boş döndü.")
         return pd.DataFrame(columns=REQUIRED_COLS)
 
-    # risk_score'u güvenli aralığa çek veya yoksa 1.0 yap
+    # risk_score’u 0–1 aralığına çek ya da yoksa 1.0 yap
     if "risk_score" in df.columns:
         df["risk_score"] = pd.to_numeric(df["risk_score"], errors="coerce").fillna(0.0).clip(0, 1)
     else:
         df["risk_score"] = 1.0
 
     return df
-
