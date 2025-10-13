@@ -15,6 +15,21 @@ def render(state=None, services=None):
     st.caption("Basit ama etkileyici: Güncel veriden risk haritası, planlama ve raporlar.")
     st.divider()
 
+    c_reload_l, c_reload_r = st.columns([1, 0.18])
+    with c_reload_r:
+        if st.button("↻ Yeniden yükle", use_container_width=True,
+                     help="Cache temizle & sayfayı tazele"):
+            try:
+                # Streamlit cache'i temizle (varsa)
+                st.cache_data.clear()
+            except Exception:
+                pass
+            # Yeniden çalıştır
+            try:
+                st.rerun()  # yeni sürümler
+            except AttributeError:
+                st.experimental_rerun() 
+
     from components.last_update import show_last_update_badge
     from utils.constants import MODEL_VERSION, MODEL_LAST_TRAIN
 
