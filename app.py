@@ -1,3 +1,4 @@
+# >>> REPLACE ENTIRE FILE: crimepredict/app.py <<<
 from __future__ import annotations
 import streamlit as st
 import pandas as pd
@@ -11,9 +12,7 @@ from utils.constants import KEY_COL, RISK_COL, DATE_COL
 
 st.set_page_config(page_title="SF Crime Risk", layout="wide")
 st.title("🗺️ SF Crime Risk — Günlük Özet")
-
-# Hangi dosya koşturuluyor? (teşhis)
-st.caption(f"Running file: {__file__}")
+st.caption(f"Running file: {__file__}")  # teşhis
 
 # 1) Veri
 try:
