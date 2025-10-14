@@ -1,21 +1,34 @@
 # app.py
 from __future__ import annotations
+
 import inspect
 import sys
 import importlib
 import importlib.util
 from pathlib import Path
+from typing import Any, Dict, List
 
+import pandas as pd
 import streamlit as st
 
+# --- Ortam/Artifact ayarı (projene özgü) ---
 from core.data_boot import configure_artifact_env
-configure_artifact_env()
+
+# --- Veri yükleyici (loader) ve metadata ---
+from crimepredict.dataio.loaders import (
+    load_sf_crime_latest,
+    load_metadata_or_default,
+    _validate_schema,
+)
 
 # Streamlit config EN ÜSTE olmalı
+configure_artifact_env()
 st.set_page_config(page_title="Suç Tahmini", page_icon="🔎", layout="wide")
 
 
-def _discover_tabs():
+# ========================= yardımcılar =========================
+
+def _discover_tabs() -> List[Dict[str, Any]]:
     """
     tabs/<name>/__init__.py içindeki register() fonksiyonlarını bulup çağırır.
     Arama sırası:
@@ -26,7 +39,7 @@ def _discover_tabs():
     here = Path(__file__).resolve()
     pkg_root = here.parent.parent
     tabs_dir = here.parent / "tabs"
-    specs = []
+    specs: List[Dict[str, Any]] = []
 
     if not tabs_dir.exists():
         return specs
@@ -70,7 +83,7 @@ def _discover_tabs():
         if mod and hasattr(mod, "register"):
             try:
                 spec_dict = mod.register()
-                # Asgari alanları güvenceye al
+                # Asgari alanlar
                 spec_dict.setdefault("key", sub.name)
                 spec_dict.setdefault("title", spec_dict.get("label", sub.name.title()))
                 spec_dict.setdefault("icon", "🗂️")
@@ -86,7 +99,7 @@ def _discover_tabs():
     return specs
 
 
-def _safe_render(render_fn):
+def _safe_render(render_fn, services: Dict[str, Any] | None = None):
     """
     Sekme render fonksiyonunu imzasına göre güvenle çağırır.
     Aşağıdakilerin hepsini destekler:
@@ -99,22 +112,39 @@ def _safe_render(render_fn):
         params = sig.parameters
         if len(params) == 0:
             return render_fn()
-        kwargs = {}
+        kwargs: Dict[str, Any] = {}
         if "state" in params:
             kwargs["state"] = None
         if "services" in params:
-            kwargs["services"] = None
+            kwargs["services"] = services
         return render_fn(**kwargs) if kwargs else render_fn()
     except TypeError:
         # Her ihtimale karşı basit çağrı
         return render_fn()
 
 
+# ========================= ana uygulama =========================
+
 def main():
     tabs = _discover_tabs()
     if not tabs:
         st.error("Sekme bulunamadı. `tabs/<name>/__init__.py` içinde register() tanımlayın.")
         st.stop()
+
+    # --- VERİ & METADATA ---
+    with st.spinner("Veri yükleniyor..."):
+        df, src_tag = load_sf_crime_latest()
+        meta = load_metadata_or_default()
+        ok, missing = _validate_schema(df)
+
+    # services nesnesi: sekmelere dağıtılacak ortak kaynaklar
+    services: Dict[str, Any] = {
+        "data": df,               # ana DataFrame
+        "source": src_tag,        # verinin geldiği katman (artifact/release/...)
+        "meta": meta,             # üretim zamanı, kolonlar, vs.
+        "schema_ok": ok,
+        "schema_missing": missing,
+    }
 
     # Aktif sekme
     active_key = st.session_state.get("__active_tab__", tabs[0]["key"])
@@ -125,13 +155,34 @@ def main():
         labels = [f"{t.get('icon', '🗂️')} {t.get('title', t.get('label', 'Sekme'))}" for t in tabs]
         keys = [t["key"] for t in tabs]
         idx = keys.index(active_key) if active_key in keys else 0
-        choice = st.radio("Sekme", labels, index=idx, label_visibility="collapsed")
+        choice = st.radio("Sekbe", labels, index=idx, label_visibility="collapsed")
         active_key = keys[labels.index(choice)]
         st.session_state["__active_tab__"] = active_key
 
+        # ---- veri durumu
+        st.divider()
+        st.caption("**Veri Durumu**")
+        st.write(f"Kaynak: `{services['source']}`")
+        try:
+            st.write(f"Satır: {len(services['data']):,}")
+        except Exception:
+            st.write("Satır: -")
+        gen_at = services["meta"].get("generated_at")
+        if gen_at:
+            st.write(f"Üretim: {gen_at}")
+        if not services["schema_ok"]:
+            st.warning(f"Beklenen şema eksik: {services['schema_missing']}")
+
+    # Boş/eksik veri için ana ekranda da uyarı
+    if not services["schema_ok"]:
+        st.info(
+            "Minimum şema `['GEOID','date','event_hour']` olmalı. "
+            "Eksikler nedeniyle bazı sekmeler sınırlı çalışabilir."
+        )
+
     # Seçili sekmeyi çalıştır
     current = next(t for t in tabs if t["key"] == active_key)
-    _safe_render(current["render"])
+    _safe_render(current["render"], services=services)
 
 
 if __name__ == "__main__":
