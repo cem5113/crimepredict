@@ -238,10 +238,10 @@ def make_map(geojson_enriched: dict):
     # low=yeşil, medium=sarı, high=turuncu, critical=kırmızı
     color_expr = [
         "case",
-        ["==", ["get", "properties.risk_level"], "low"], [56, 168, 0],
-        ["==", ["get", "properties.risk_level"], "medium"], [255, 221, 0],
-        ["==", ["get", "properties.risk_level"], "high"], [255, 140, 0],
-        ["==", ["get", "properties.risk_level"], "critical"], [204, 0, 0],
+        ["==", ["get", "risk_level"], "low"], [56, 168, 0],
+        ["==", ["get", "risk_level"], "medium"], [255, 221, 0],
+        ["==", ["get", "risk_level"], "high"], [255, 140, 0],
+        ["==", ["get", "risk_level"], "critical"], [204, 0, 0],
         [200, 200, 200],
     ]
 
@@ -256,11 +256,8 @@ def make_map(geojson_enriched: dict):
     )
 
     tooltip = {
-        "html": (
-            "<b>ID:</b> {properties.display_id}<br/>"
-            "<b>Risk:</b> {properties.risk_level}<br/>"
-            "<b>Skor:</b> {properties.risk_score_txt}"
-        ),
+        "text": "ID: {display_id}\nRisk: {risk_level}\nSkor: {risk_score_txt}"
+    }
         "style": {"backgroundColor": "#262730", "color": "white"},
     }
     deck = pdk.Deck(
