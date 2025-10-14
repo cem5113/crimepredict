@@ -154,7 +154,7 @@ def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
     """Seçilen gün risk metriklerini GeoJSON özelliklerine ekler (GEOID eşlemesi)."""
     if not geojson_dict:
         return {}
-    props_key_candidates = ['GEOID', 'geoid']
+    props_key_candidates = ['GEOID', 'geoid', 'cell_id']
 
     dmap = day_df.set_index(day_df['geoid'].astype(str))
     features_out = []
@@ -275,7 +275,7 @@ def fetch_geojson_auto() -> dict:
     2) Repo contents API (OWNER/REPO içindeki geojson_path)
     3) Secrets: geojson_url doğrudan indir
     """
-    path = st.secrets.get("geojson_path", "sf_tracts.geojson")
+    path = st.secrets.get("geojson_path", "sf_cells.geojson")
     url_override = st.secrets.get("geojson_url", "")
 
     # 1) Artifact içinden dene
