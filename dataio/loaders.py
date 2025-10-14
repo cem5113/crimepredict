@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import sys
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -16,21 +17,24 @@ import requests
 # ===================== path & settings =====================
 
 _THIS = Path(__file__).resolve()
-# repo-root/crimepredict/dataio/loaders.py  → repo-root/crimepredict
-_PKG_ROOT = _THIS.parents[1]
+# repo-root/crimepredict/dataio/loaders.py → repo-root
+_REPO_ROOT = _THIS.parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
-# settings'i iki olası konumdan da destekle (paket-içi veya kök/config)
+# settings modülünü nerede olursa olsun bul: (1) crimepredict/config, (2) kök/config, (3) defaults
+_S = None
 try:
-    from crimepredict.config.settings import (
-        DATA_DIR as SETTINGS_DATA_DIR,
-        RESULTS_DIR as SETTINGS_RESULTS_DIR,
-    )
+    import crimepredict.config.settings as _S  # type: ignore
 except Exception:
-    # Eğer proje yapında config kökteyse:
-    from config.settings import (  # type: ignore
-        DATA_DIR as SETTINGS_DATA_DIR,
-        RESULTS_DIR as SETTINGS_RESULTS_DIR,
-    )
+    try:
+        import config.settings as _S  # type: ignore
+    except Exception:
+        _S = None  # defaults'a düş
+
+# DATA_DIR / RESULTS_DIR settings'te yoksa defaults
+SETTINGS_DATA_DIR = getattr(_S, "DATA_DIR", "./data")
+SETTINGS_RESULTS_DIR = getattr(_S, "RESULTS_DIR", "./results")
 
 DATA_DIR = Path(SETTINGS_DATA_DIR)
 RESULTS_DIR = Path(SETTINGS_RESULTS_DIR)
@@ -73,7 +77,7 @@ def _headers(require_auth: bool = False) -> Optional[Dict[str, str]]:
 
 def _read_anyframe_from_bytes(blob: bytes) -> pd.DataFrame:
     """
-    Bytes içeriğini parquet -> csv sırası ile okumayı dener; olmazsa diske yazıp tekrar dener.
+    Bytes içeriğini CSV -> Parquet sırası ile okumayı dener; olmazsa diske yazıp tekrar dener.
     """
     # İlk deneme: CSV
     try:
@@ -351,3 +355,11 @@ def load_sf_crime_latest() -> Tuple[pd.DataFrame, str]:
         {"GEOID": [], "date": [], "event_hour": [], "crime_count": [], "lat": [], "lon": []}
     )
     return df, "empty"
+
+
+__all__ = [
+    "load_sf_crime_latest",
+    "load_metadata",
+    "load_metadata_or_default",
+    "_validate_schema",
+]
