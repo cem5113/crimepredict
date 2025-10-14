@@ -1,77 +1,115 @@
 from __future__ import annotations
-import streamlit as st
+import traceback
+from typing import Dict, Any, List, Optional
+
 import pandas as pd
-from core.data import (list_members, load_parquet, _read_schema, _pick_best_member, get_latest_kpis)
-from config.settings import ARTIFACT_ZIP
+import streamlit as st
+
+# --- core.data bağımlılıklarını güvenli içe aktar ---
+try:
+    # Public API
+    from core.data import list_members, load_parquet, get_latest_kpis  # type: ignore
+except Exception as e:
+    st.warning(f"core.data public API import edilemedi: {e}")
+    def list_members() -> List[str]:
+        return []
+    def load_parquet(member: str, columns: Optional[List[str]] = None) -> pd.DataFrame:
+        return pd.DataFrame()
+    def get_latest_kpis() -> Dict[str, Any]:
+        return {}
+
+# Opsiyonel (private) yardımcılar — yoksa graceful degrade
+try:
+    from core.data import _read_schema, _pick_best_member  # type: ignore
+except Exception:
+    _read_schema = None
+    _pick_best_member = None
 
 TAB_KEY = "diagnostics"
 
-def _bool_emoji(v: bool) -> str:
-    return "✅" if v else "❌"
+def _geoid_report(df: pd.DataFrame) -> Dict[str, Any]:
+    rep: Dict[str, Any] = {"geoid_present": False}
+    if df is None or df.empty or "geoid" not in df.columns:
+        return rep
+    s = df["geoid"]
+    rep["geoid_present"] = True
+    rep["geoid_dtype"] = str(s.dtype)
+    # float kaynaklı sorunlar
+    as_str = s.astype("string")
+    rep["geoid_float_count"] = int((s.astype(str).str.contains(r"\.0$", regex=True, na=False)).sum())
+    rep["geoid_float_samples"] = list(as_str[s.astype(str).str.contains(r"\.0$", regex=True, na=False)].head(5))
+    rep["geoid_str_dotzero_count"] = int((as_str.str.endswith(".0", na=False)).sum())
+    rep["geoid_str_dotzero_samples"] = list(as_str[as_str.str.endswith(".0", na=False)].head(5))
+    return rep
 
-def render(state=None, services=None):
-    st.title("🔎 Veri Teşhis")
-    st.caption(f"📦 Zip yolu: {ARTIFACT_ZIP}")
+def _nan_counts(df: pd.DataFrame, cols: List[str]) -> Dict[str, int]:
+    out: Dict[str, int] = {}
+    for c in cols:
+        if c in df.columns:
+            out[c] = int(df[c].isna().sum())
+    return out
 
-    members = list_members()
+def render(state=None, services=None) -> None:
+    st.title("🩺 Teşhis (Diagnostics)")
+
+    st.subheader("Veri üyeleri")
+    members = list_members() or []
     if not members:
-        st.error("Zip bulunamadı veya içinde .parquet üye yok.")
+        st.info("Paket içinde veri üyesi (parquet/karar) bulunamadı.")
         return
-    st.success(f"{len(members)} parquet bulundu.")
-    with st.expander("Üyeleri göster (ilk 30)"):
-        st.code("\n".join(members[:30]), language="text")
+    st.write(members)
 
-    member = _pick_best_member() or members[0]
-    st.info(f"Seçilen üye: {member}")
+    # En iyi aday üye: risk_hourly varsa onu seç
+    candidate = "risk_hourly.parquet" if "risk_hourly.parquet" in members else members[0]
+    if _pick_best_member:
+        try:
+            candidate = _pick_best_member(members) or candidate  # type: ignore
+        except Exception:
+            pass
 
-    schema = _read_schema(member)
-    with st.expander("Şema sütunları"):
-        st.code(", ".join(schema), language="text")
-
-    wanted = ["geoid","lat","lon","timestamp","risk_score","risk_level","pred_expected","date","hour_range"]
-    df = load_parquet(member, columns=wanted)
-    if df.empty:
-        st.error("Seçilen üyeden veri okunamadı (boş DataFrame).")
+    st.subheader("Örnek veri")
+    try:
+        df = load_parquet(candidate, columns=["geoid", "risk_score", "risk_level", "date", "hour_range", "latitude", "longitude"])
+    except Exception as e:
+        st.error(f"Veri okunamadı: {e}")
+        st.code(traceback.format_exc())
         return
 
-    st.subheader("Örnek veri (ilk 10)")
-    st.dataframe(df.head(10), use_container_width=True)
+    if df is None or df.empty:
+        st.warning("Veri boş görünüyor.")
+        return
 
-    has_lat = "lat" in df.columns and pd.to_numeric(df["lat"], errors="coerce").notna().any()
-    has_lon = "lon" in df.columns and pd.to_numeric(df["lon"], errors="coerce").notna().any()
-    st.write(f"🧭 Lat/Lon mevcut mu? lat: {_bool_emoji(has_lat)} • lon: {_bool_emoji(has_lon)}")
+    st.write(df.head(10))
 
-    ts_ok = False
-    if "timestamp" in df.columns:
-        ts_s = pd.to_datetime(df["timestamp"], unit="s", errors="coerce")
-        ts_ms = pd.to_datetime(df["timestamp"], unit="ms", errors="coerce")
-        ts_ok = ts_s.notna().any() or ts_ms.notna().any()
-        st.write(f"⏱️ timestamp epoch mu? {_bool_emoji(ts_ok)}")
-        with st.expander("timestamp örnekleri"):
-            st.write(df["timestamp"].head().tolist())
+    st.subheader("GEOID Raporu")
+    rep = _geoid_report(df)
+    st.json(rep)
+
+    st.subheader("Lat/Lon NaN sayıları")
+    st.json(_nan_counts(df, ["latitude", "longitude"]))
+
+    st.subheader("Şema")
+    if _read_schema:
+        try:
+            schema = _read_schema(candidate)  # type: ignore
+            st.json({f.name: str(f.type) for f in schema})
+        except Exception as e:
+            st.info(f"Şema okunamadı: {e}")
     else:
-        st.write("⏱️ timestamp: bulunamadı")
+        st.caption("(_read_schema mevcut değil)")
 
-    if "risk_score" in df.columns:
-        rs = pd.to_numeric(df["risk_score"], errors="coerce")
-        nan_rate = float(rs.isna().mean())
-        st.write(f"📊 risk_score min–max: {float(rs.min(skipna=True)):.3f} → {float(rs.max(skipna=True)):.3f} • NaN oranı: {nan_rate:.2%}")
-        if not (rs.min(skipna=True) >= 0 and rs.max(skipna=True) <= 1):
-            st.warning("risk_score 0–1 aralığında değil; normalize edilmeli.")
+    st.subheader("Son KPI'lar")
+    try:
+        st.json(get_latest_kpis() or {})
+    except Exception as e:
+        st.info(f"KPI okunamadı: {e}")
 
-    if "risk_level" in df.columns:
-        st.write("🏷️ risk_level örnekleri:", df["risk_level"].astype(str).dropna().unique()[:10])
-
-    k = get_latest_kpis()
-    st.subheader("KPI")
-    st.info(f"rows={k['rows']} • last_update={k['last_update']} • avg_risk={{k['avg_risk']}} • high_rate={k['high_rate']} • member={k['member']}")
-
-def register():
+def register() -> Dict[str, Any]:
     return {
         "key": TAB_KEY,
-        "title": "Veri Teşhis",
-        "icon": "🔎",
-        "label": "🔎 Veri Teşhis",   # eski keşif kodları için emniyet supabı
-        "order": 99,
+        "title": "Teşhis",
+        "label": "🩺 Teşhis",
+        "icon": "🩺",
+        "order": 98,
         "render": render,
     }
