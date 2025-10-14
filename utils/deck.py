@@ -1,139 +1,188 @@
-# crimepredict/utils/deck.py
 from __future__ import annotations
+import json
+from typing import Optional, Dict, Any, List
 
-from typing import Optional, Dict
 import numpy as np
 import pandas as pd
 import pydeck as pdk
 
-from crimepredict.utils.constants import KEY_COL  # GEOID benzeri anahtar sütun adı
+try:
+    # Projedeki standart sabit
+    from crimepredict.utils.constants import KEY_COL  # type: ignore
+except Exception:  # fallback
+    KEY_COL = "GEOID"
 
-# -----------------------------------------------------------------------------
-# Renk paleti (Türkçe seviyeler)
-# -----------------------------------------------------------------------------
-_PALETTE = {
-    "Çok Düşük": [198, 219, 239, 140],
-    "Düşük":     [107, 174, 214, 180],
-    "Orta":      [74, 140, 217, 200],
-    "Yüksek":    [255, 192, 122, 210],
-    "Çok Yüksek":[239, 59, 44, 210],
+# ───────────────────────────── R E N K   S İ S T E M İ ─────────────────────────────
+# Seviye alias’ları: aksan/boşluk/küçük-büyük farkını normalize eder
+_TIER_ALIASES: Dict[str, str] = {
+    "cok yuksek": "Çok Yüksek", "çok yüksek": "Çok Yüksek",
+    "yuksek": "Yüksek", "yüksek": "Yüksek",
+    "orta": "Orta",
+    "dusuk": "Düşük", "düşük": "Düşük",
+    "cok dusuk": "Çok Düşük", "çok düşük": "Çok Düşük",
 }
-_DEF = [90, 120, 140, 180]
+
+def _norm_level(val: Optional[str]) -> Optional[str]:
+    if val is None:
+        return None
+    s = str(val).strip()
+    low = s.lower()
+    return _TIER_ALIASES.get(low, s)
+
+# Paletler (LIGHT & DARK)  → RGBA
+_COLOR_LIGHT: Dict[str, List[int]] = {
+    "Çok Düşük":  [198, 219, 239, 140],  # #C6DBEF
+    "Düşük":      [107, 174, 214, 180],  # #6BAED6
+    "Orta":       [ 74, 140, 217, 200],  # #4A90D9
+    "Yüksek":     [255, 192, 122, 210],  # #FFC07A
+    "Çok Yüksek": [239,  59,  44, 210],  # #EF3B2C
+}
+
+_COLOR_DARK: Dict[str, List[int]] = {
+    # Koyu temada kontrastı biraz arttırılmış tonlar
+    "Çok Düşük":  [173, 205, 224, 150],
+    "Düşük":      [ 92, 157, 193, 190],
+    "Orta":       [ 60, 120, 186, 210],
+    "Yüksek":     [237, 178, 110, 220],
+    "Çok Yüksek": [230,  72,  55, 220],
+}
+
+# Varsayılan (eşleşmeyen/boş) renk
+_DEF_COLOR: List[int] = [90, 120, 140, 180]  # #5A788C → koyu gridemsi mavi
 
 
-# -----------------------------------------------------------------------------
-# Yardımcılar
-# -----------------------------------------------------------------------------
-def _ensure(df_like) -> pd.DataFrame:
+def _get_palette(*, dark_mode: bool = False,
+                 override: Optional[Dict[str, List[int]]] = None) -> Dict[str, List[int]]:
+    """Öncelik: override (kullanıcı verdi) → dark/light palet."""
+    if override:
+        fixed: Dict[str, List[int]] = {}
+        for k, v in override.items():
+            nk = _norm_level(k) or str(k)
+            fixed[nk] = list(map(int, v))
+        return fixed
+    return _COLOR_DARK if dark_mode else _COLOR_LIGHT
+
+
+def color_for(level: Optional[str], *,
+              dark_mode: bool = False,
+              override: Optional[Dict[str, List[int]]] = None) -> List[int]:
+    """Seviye → RGBA renk (tema ve isteğe bağlı override ile)."""
+    pal = _get_palette(dark_mode=dark_mode, override=override)
+    key = _norm_level(level) or ""
+    return pal.get(key, _DEF_COLOR)
+
+
+# ───────────────────────────── V E R İ   H A Z I R L I K ─────────────────────────────
+
+def ensure(df_like: pd.DataFrame | Dict[str, Any]) -> pd.DataFrame:
     """
-    Girdiyi güvenli DataFrame'e çevirir ve harita katmanının beklediği kolonları üretir.
-
-    - KEY_COL stringe çevrilir (yoksa boş string atanır)
-    - pred_expected yoksa expected/risk_score'dan üretilir
-    - risk_score (varsa) 0-1 aralığına kırpılır
-    - risk_level yoksa risk_score veya pred_expected üzerinden kuantil eşiklerle oluşturulur
-    - neighborhood yoksa boş string atanır
-    - pred_expected_fmt (tooltip için) 2 hane yuvarlanmış string üretilir
+    Girdiyi güvenli DataFrame'e çevirip aşağıdakileri garanti eder:
+      - KEY_COL string tipinde
+      - pred_expected (yoksa expected'tan)
+      - risk_level (yoksa tier'dan; o da yoksa kantil tabanlı)
+      - pred_expected_fmt (tooltip için yuvarlatılmış)
+      - neighborhood (yoksa boş string)
     """
     d = pd.DataFrame(df_like).copy()
 
-    # 1) KEY_COL
-    if KEY_COL in d.columns:
-        d[KEY_COL] = d[KEY_COL].astype(str)
-    else:
-        d[KEY_COL] = ""
+    # E[olay]
+    if "pred_expected" not in d.columns:
+        d["pred_expected"] = pd.to_numeric(d.get("expected", 0.0), errors="coerce").fillna(0.0)
 
-    # 2) pred_expected
-    if "pred_expected" in d.columns:
-        d["pred_expected"] = pd.to_numeric(d["pred_expected"], errors="coerce").fillna(0.0)
-    else:
-        base = (
-            d["expected"] if "expected" in d.columns
-            else d["risk_score"] if "risk_score" in d.columns
-            else 0.0
-        )
-        d["pred_expected"] = pd.to_numeric(base, errors="coerce").fillna(0.0)
-
-    # 3) risk_score normalize
-    if "risk_score" in d.columns:
-        d["risk_score"] = pd.to_numeric(d["risk_score"], errors="coerce").fillna(0.0).clip(0, 1)
-
-    # 4) risk_level üret (yoksa)
+    # Risk seviyesi
     if "risk_level" not in d.columns:
-        # Öncelik risk_score; yoksa pred_expected
-        src = d["risk_score"] if "risk_score" in d.columns else d["pred_expected"]
-        x = pd.to_numeric(src, errors="coerce").astype(float).to_numpy()
-        mask = np.isfinite(x)
-
-        if mask.sum() >= 5:
-            q1, q2, q3, q4 = np.quantile(x[mask], [0.2, 0.4, 0.6, 0.8])
-
-            def lvl(v: float) -> str:
-                if v <= q1: return "Çok Düşük"
-                if v <= q2: return "Düşük"
-                if v <= q3: return "Orta"
-                if v <= q4: return "Yüksek"
-                return "Çok Yüksek"
-
-            d["risk_level"] = [lvl(float(v)) if np.isfinite(v) else "Çok Düşük" for v in x]
+        if "tier" in d.columns:
+            d["risk_level"] = d["tier"].map(_norm_level).fillna("Çok Düşük")
         else:
-            d["risk_level"] = "Çok Düşük"
+            x = d["pred_expected"].to_numpy(dtype=float)
+            finite = np.isfinite(x)
+            if finite.sum() >= 5:
+                q20, q40, q60, q80 = np.quantile(x[finite], [0.20, 0.40, 0.60, 0.80])
+                def to_lvl(v: float) -> str:
+                    if v <= q20: return "Çok Düşük"
+                    if v <= q40: return "Düşük"
+                    if v <= q60: return "Orta"
+                    if v <= q80: return "Yüksek"
+                    return "Çok Yüksek"
+                d["risk_level"] = [to_lvl(float(v)) for v in x]
+            else:
+                d["risk_level"] = "Çok Düşük"
+    else:
+        d["risk_level"] = d["risk_level"].map(_norm_level).fillna("Çok Düşük")
 
-    # 5) Görsel formatlar ve mahalle
     d["pred_expected_fmt"] = pd.to_numeric(d["pred_expected"], errors="coerce").fillna(0.0).round(2)
     if "neighborhood" not in d.columns:
         d["neighborhood"] = ""
-
+    if KEY_COL in d.columns:
+        d[KEY_COL] = d[KEY_COL].astype(str)
+    else:
+        # Yoksa KEY_COL oluşturmayı dene
+        if "geoid" in d.columns:
+            d[KEY_COL] = d["geoid"].astype(str)
+        else:
+            d[KEY_COL] = ""
     return d
 
 
-def _collapse_24h(df: pd.DataFrame) -> pd.DataFrame:
+def _try_build_geojson(data: pd.DataFrame,
+                       *,
+                       dark_mode: bool = False,
+                       override_palette: Optional[Dict[str, List[int]]] = None) -> tuple[bool, Dict[str, Any]]:
     """
-    date / hour_range tekrarlarını yok sayıp GEOID (KEY_COL) bazında 24 saatlik
-    ortalama risk_score ve pred_expected üretir. neighborhood varsa ilkini korur.
+    df['geometry'] varsa ve JSON parse edilebiliyorsa GeoJSON FeatureCollection üretir.
+    properties içine: KEY_COL, neighborhood, pred_expected, pred_expected_fmt, risk_level, _color eklenir.
     """
-    d = pd.DataFrame(df).copy()
+    if "geometry" not in data.columns:
+        return False, {}
+    feats: List[Dict[str, Any]] = []
+    try:
+        for _, r in data.iterrows():
+            geom = r["geometry"]
+            geom_obj = geom if isinstance(geom, dict) else json.loads(geom)
+            lvl = _norm_level(r.get("risk_level", ""))
+            feats.append({
+                "type": "Feature",
+                "properties": {
+                    KEY_COL: r.get(KEY_COL, ""),
+                    "geoid": r.get(KEY_COL, ""),
+                    "neighborhood": r.get("neighborhood", ""),
+                    "pred_expected": float(r.get("pred_expected", 0.0)),
+                    "pred_expected_fmt": float(r.get("pred_expected_fmt", 0.0)),
+                    "risk_level": lvl or "",
+                    "_color": color_for(lvl, dark_mode=dark_mode, override=override_palette),
+                },
+                "geometry": geom_obj,
+            })
+        return True, {"type": "FeatureCollection", "features": feats}
+    except Exception:
+        return False, {}
 
-    if "risk_score" in d.columns:
-        d["risk_score"] = pd.to_numeric(d["risk_score"], errors="coerce").fillna(0.0).clip(0, 1)
 
-    if "pred_expected" not in d.columns:
-        base = (
-            d["expected"] if "expected" in d.columns
-            else d["risk_score"] if "risk_score" in d.columns
-            else 0.0
-        )
-        d["pred_expected"] = pd.to_numeric(base, errors="coerce").fillna(0.0)
+# ───────────────────────────── A N A   A P I ─────────────────────────────
 
-    agg = {"risk_score": "mean", "pred_expected": "mean"}
-    if "neighborhood" in d.columns:
-        agg["neighborhood"] = (lambda s: s.iloc[0] if len(s) else "")
-
-    g = d.groupby(KEY_COL, as_index=False).agg(agg)
-    return g
-
-
-# -----------------------------------------------------------------------------
-# Ana harita katmanı
-# -----------------------------------------------------------------------------
 def build_map_fast_deck(
     df_agg: pd.DataFrame,
     geo_df: pd.DataFrame,
     *,
-    show_hotspot: bool = True,
-    show_temp_hotspot: bool = True,
+    show_poi: bool = False,                 # imza uyumu için ayrık parametreler
+    show_transit: bool = False,
+    patrol=None,
+    show_hotspot: bool = True,              # kalıcı hotspot (%90 üstü)
+    show_temp_hotspot: bool = True,         # geçici hotspot (HeatmapLayer)
     temp_hotspot_points: pd.DataFrame | None = None,
-    show_risk_layer: bool = True,
-    map_style: str = "mapbox://styles/mapbox/dark-v11",
-    initial_view: Optional[Dict[str, float]] = None,
-    aggregate_24h: bool = True,  # 24 saatlik ortalama modunu aç/kapa
+    show_risk_layer: bool = True,           # poligon/centroid risk katmanı
+    map_style: str = "mapbox://styles/mapbox/light-v11",  # "dark-v11" → koyu tema
+    initial_view: Optional[Dict[str, float]] = None,       # {"lat":.., "lon":.., "zoom":..}
+    override_palette: Optional[Dict[str, List[int]]] = None,
 ) -> pdk.Deck:
-    """
-    Saatlik/tekrarlı tahminleri 24 saatlik ortalamaya indirip (opsiyonel),
-    GEOID merkezlerine risk katmanı, opsiyonel ısı katmanı ve hotspot overlay oluşturur.
-    """
+    """PyDeck için risk/yoğunluk haritasını hızlıca üretir.
 
-    # Boş veri durumu
+    df_agg: GEOID başına özet risk ve opsiyonel geometri.
+    geo_df: en azından [KEY_COL, centroid_lat, centroid_lon] kolonlarını sağlamalı.
+    """
+    _is_dark = str(map_style).endswith("dark-v11")
+
+    # Boş veri durumda dahi bir Deck döndür (UI kırılmasın)
     if df_agg is None or len(df_agg) == 0:
         return pdk.Deck(
             map_style=map_style,
@@ -145,63 +194,61 @@ def build_map_fast_deck(
             layers=[],
         )
 
-    # GEO centroid kontrolü
-    needed_geo_cols = {KEY_COL, "centroid_lat", "centroid_lon"}
-    if not needed_geo_cols.issubset(set(geo_df.columns)):
-        # Eksik centroid kolonları varsa katman üretmeden boş deck dön
-        return pdk.Deck(
-            map_style=map_style,
-            initial_view_state=pdk.ViewState(
-                latitude=(initial_view or {}).get("lat", 37.7749),
-                longitude=(initial_view or {}).get("lon", -122.4194),
-                zoom=(initial_view or {}).get("zoom", 11.8),
-            ),
-            layers=[],
-            tooltip={"text": "Geo centroid verileri eksik: centroid_lat/centroid_lon"},
-        )
+    data = ensure(df_agg)
+    layers: List[pdk.Layer] = []
 
-    # 24 saatlik ortalamaya indir (tarih/hour_range yok say)
-    data_in = pd.DataFrame(df_agg)
-    if aggregate_24h:
-        data_in = _collapse_24h(data_in)
+    # GeoJSON mu, centroid mi?
+    has_geojson, data_gj = _try_build_geojson(data, dark_mode=_is_dark, override_palette=override_palette)
 
-    # Aşağı katmanların beklediği formatı garanti et
-    data = _ensure(data_in)
-
-    layers: list[pdk.Layer] = []
-
-    # --- RİSK KATMANI (centroidler) ---
+    # ── Risk katmanı
     if show_risk_layer:
-        centers = (
-            data.merge(
-                geo_df[[KEY_COL, "centroid_lat", "centroid_lon"]],
-                on=KEY_COL,
-                how="left",
+        if has_geojson:
+            layers.append(
+                pdk.Layer(
+                    "GeoJsonLayer",
+                    data=data_gj,
+                    pickable=True,
+                    stroked=True,
+                    filled=True,
+                    get_fill_color="properties._color",  # RGBA listesi
+                    get_line_color=[80, 80, 80, 120] if not _is_dark else [220, 220, 220, 120],
+                    get_line_width=1,
+                    extruded=False,
+                    parameters={"depthTest": False},
+                )
             )
-            .dropna(subset=["centroid_lat", "centroid_lon"])
-            .copy()
-        )
-        centers["_color"] = centers["risk_level"].map(lambda k: _PALETTE.get(k, _DEF))
-
-        layers.append(
-            pdk.Layer(
-                "ScatterplotLayer",
-                data=centers,
-                pickable=True,
-                get_position="[centroid_lon, centroid_lat]",
-                get_radius=80,
-                radius_min_pixels=2,
-                radius_max_pixels=90,
-                get_fill_color="_color",
+        else:
+            # centroid yolu
+            centers = (
+                data.merge(
+                    geo_df[[KEY_COL, "centroid_lat", "centroid_lon"]],
+                    on=KEY_COL, how="left",
+                )
+                .dropna(subset=["centroid_lat", "centroid_lon"])
+                .copy()
             )
-        )
+            centers["_color"] = centers["risk_level"].apply(
+                lambda s: color_for(s, dark_mode=_is_dark, override=override_palette)
+            )
+            layers.append(
+                pdk.Layer(
+                    "ScatterplotLayer",
+                    data=centers,
+                    pickable=True,
+                    get_position="[centroid_lon, centroid_lat]",
+                    get_radius=80,
+                    radius_min_pixels=2,
+                    radius_max_pixels=80,
+                    get_fill_color="_color",          # RGBA listesi
+                )
+            )
 
-    # --- ISI KATMANI (opsiyonel) ---
+    # ── Geçici hotspot (HeatmapLayer)
     if show_temp_hotspot and isinstance(temp_hotspot_points, pd.DataFrame) and not temp_hotspot_points.empty:
         pts = temp_hotspot_points.copy()
-        lc = {c.lower(): c for c in pts.columns}
-        lat = lc.get("lat") or lc.get("latitude")
-        lon = lc.get("lon") or lc.get("longitude")
+        cols_lower = {c.lower(): c for c in pts.columns}
+        lat = cols_lower.get("latitude") or cols_lower.get("lat")
+        lon = cols_lower.get("longitude") or cols_lower.get("lon")
         if lat and lon:
             pts = pts.rename(columns={lat: "lat", lon: "lon"})
             if "weight" not in pts.columns:
@@ -217,45 +264,60 @@ def build_map_fast_deck(
                 )
             )
 
-    # --- HOTSPOT İŞARETLEYİCİLERİ (üst %10) ---
-    if show_hotspot and "pred_expected" in data.columns:
-        x = pd.to_numeric(data["pred_expected"], errors="coerce").fillna(0.0).to_numpy()
-        mask = np.isfinite(x)
-        if mask.sum() >= 1:
-            thr = float(np.quantile(x[mask], 0.90))
-            strong = (
-                data[data["pred_expected"] >= thr]
-                .merge(geo_df[[KEY_COL, "centroid_lat", "centroid_lon"]], on=KEY_COL, how="left")
-                .dropna(subset=["centroid_lat", "centroid_lon"])
-            )
-            if not strong.empty:
-                layers.append(
-                    pdk.Layer(
-                        "ScatterplotLayer",
-                        data=strong,
-                        pickable=False,
-                        get_position="[centroid_lon, centroid_lat]",
-                        get_radius=120,
-                        get_fill_color=[139, 0, 0, 200],  # koyu kırmızı halka
-                    )
+    # ── Kalıcı hotspot (üst %10, Scatterplot)
+    if show_hotspot:
+        metric = "pred_expected" if "pred_expected" in data.columns else None
+        if metric:
+            x = pd.to_numeric(data[metric], errors="coerce").fillna(0.0).to_numpy()
+            mask = np.isfinite(x)
+            if mask.sum() >= 1:
+                thr = float(np.quantile(x[mask], 0.90))
+                strong = (
+                    data[data[metric] >= thr]
+                    .merge(geo_df[[KEY_COL, "centroid_lat", "centroid_lon"]], on=KEY_COL, how="left")
+                    .dropna(subset=["centroid_lat", "centroid_lon"])
+                    .copy()
                 )
+                if not strong.empty:
+                    layers.append(
+                        pdk.Layer(
+                            "ScatterplotLayer",
+                            data=strong,
+                            pickable=False,
+                            get_position="[centroid_lon, centroid_lat]",
+                            get_radius=120,
+                            get_fill_color=[139, 0, 0, 200],  # koyu kırmızı marker
+                        )
+                    )
 
-    # Tooltip
+    # ── Tooltip
     tooltip = {
         "html": (
             f"<b>{KEY_COL}:</b> {{{KEY_COL}}}<br>"
             "<b>Mahalle:</b> {neighborhood}<br>"
-            "<b>E[olay] (24s ort.):</b> {pred_expected_fmt}<br>"
+            "<b>E[olay]:</b> {pred_expected_fmt}<br>"
             "<b>Risk seviyesi:</b> {risk_level}"
         ),
-        "style": {"backgroundColor": "rgba(0,0,0,0.78)", "color": "white"},
+        "style": {"backgroundColor": "rgba(0,0,0,0.78)", "color": "white"} if _is_dark
+                 else {"backgroundColor": "rgba(255,255,255,0.92)", "color": "black"},
     }
 
-    # Başlangıç görünümü
-    view = pdk.ViewState(
+    # ── Görünüm
+    view_state = pdk.ViewState(
         latitude=(initial_view or {}).get("lat", 37.7749),
         longitude=(initial_view or {}).get("lon", -122.4194),
         zoom=(initial_view or {}).get("zoom", 11.8),
     )
 
-    return pdk.Deck(layers=layers, initial_view_state=view, map_style=map_style, tooltip=tooltip)
+    return pdk.Deck(
+        layers=layers,
+        initial_view_state=view_state,
+        map_style=map_style,
+        tooltip=tooltip,
+    )
+
+
+# ───────────────────────────── K ı s a   K u l l a n ı m ─────────────────────────────
+# from crimepredict.utils.deck import build_map_fast_deck, ensure
+# deck = build_map_fast_deck(df_agg, geo_df, map_style="mapbox://styles/mapbox/light-v11")
+# st.pydeck_chart(deck)
