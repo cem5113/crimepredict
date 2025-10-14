@@ -1,5 +1,6 @@
 # crimepredict/tabs/home/__init__.py
 from .view import render
+import tabs.home.diagnostics
 
 def register():
     return {
