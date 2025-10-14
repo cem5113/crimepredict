@@ -91,7 +91,14 @@ def _discover_tabs() -> List[Dict[str, Any]]:
       1) crimepredict.tabs.<name>
       2) <paket_adı>.tabs.<name>  (dosya konumundan türetilen)
       3) Yol üzerinden modül yükleme
+    Hatalı/bozuk sekmeleri atlar; app'i düşürmez.
     """
+    from pathlib import Path
+    import sys
+    import importlib
+    import importlib.util
+    import streamlit as st  # type: ignore
+
     here = Path(__file__).resolve()
     pkg_root = here.parent.parent
     tabs_dir = here.parent / "tabs"
@@ -100,15 +107,37 @@ def _discover_tabs() -> List[Dict[str, Any]]:
     if not tabs_dir.exists():
         return specs
 
-    # PYTHONPATH'e proje kökünü ekle
     if str(pkg_root) not in sys.path:
         sys.path.insert(0, str(pkg_root))
 
     pkg_name = here.parent.name  # örn: crimepredict
 
+    order_pref = ["home", "forecast", "planning", "stats", "reports", "diagnostics"]
+
+    def _normalize(spec: Dict[str, Any], key_hint: str) -> Dict[str, Any] | None:
+        if not isinstance(spec, dict):
+            return None
+        # zorunlu alanlar ve varsayılanlar
+        spec.setdefault("key", key_hint)
+        if "render" not in spec or not callable(spec["render"]):
+            return None
+        # title/label uyumu
+        if "label" not in spec and "title" in spec:
+            spec["label"] = spec["title"]
+        if "title" not in spec and "label" in spec:
+            spec["title"] = spec["label"]
+        spec.setdefault("title", key_hint.title())
+        spec.setdefault("label", spec["title"])
+        spec.setdefault("icon", "🗂️")
+        spec.setdefault("order", 99)
+        return spec
+
     for sub in sorted(tabs_dir.iterdir()):
         if not sub.is_dir():
             continue
+        if sub.name.startswith("_") and sub.name != "_template":
+            continue
+
         init_py = sub / "__init__.py"
         if not init_py.exists():
             continue
@@ -128,32 +157,57 @@ def _discover_tabs() -> List[Dict[str, Any]]:
             except Exception:
                 mod = None
 
-        # 3) Yol üzerinden yükle
+        # 3) Yol üzerinden yükle (bozuk dosyaları güvenle atla)
         if mod is None:
-            spec = importlib.util.spec_from_file_location(f"{pkg_name}.tabs.{sub.name}", init_py)
-            if spec and spec.loader:
-                mod = importlib.util.module_from_spec(spec)
-                sys.modules[f"{pkg_name}.tabs.{sub.name}"] = mod
-                spec.loader.exec_module(mod)  # type: ignore
-
-        if mod and hasattr(mod, "register"):
             try:
-                spec_dict = mod.register()
-                # Asgari alanlar
-                spec_dict.setdefault("key", sub.name)
-                spec_dict.setdefault("title", spec_dict.get("label", sub.name.title()))
-                spec_dict.setdefault("icon", "🗂️")
-                spec_dict.setdefault("order", 99)
-                assert callable(spec_dict["render"]), f"{sub.name}: render callable değil."
-                specs.append(spec_dict)
+                spec = importlib.util.spec_from_file_location(f"{pkg_name}.tabs.{sub.name}", init_py)
+                if spec and spec.loader:
+                    mod = importlib.util.module_from_spec(spec)
+                    sys.modules[f"{pkg_name}.tabs.{sub.name}"] = mod
+                    spec.loader.exec_module(mod)  # type: ignore[attr-defined]
+            except (SyntaxError, IndentationError) as e:
+                st.warning(f"'{sub.name}' sekmesi atlandı (sözdizim/girinti hatası): {e}")
+                mod = None
             except Exception as e:
-                st.error(f"Sekme register() hatası: {sub.name} → {e}")
+                st.warning(f"'{sub.name}' sekmesi yüklenemedi: {e}")
+                mod = None
 
-    # İstenen sıralama önceliği
-    order_pref = ["home", "forecast", "planning", "stats", "reports", "diagnostics"]
-    specs.sort(key=lambda x: order_pref.index(x["key"]) if x["key"] in order_pref else x.get("order", 99))
+        if not mod:
+            continue
+
+        reg = getattr(mod, "register", None)
+        if not callable(reg):
+            st.info(f"'{sub.name}' sekmesi atlandı (register() yok).")
+            continue
+
+        try:
+            spec_dict = reg()
+        except Exception as e:
+            st.warning(f"'{sub.name}'.register() hata verdi: {e}")
+            continue
+
+        spec_dict = _normalize(spec_dict, key_hint=sub.name)
+        if not spec_dict:
+            st.info(f"'{sub.name}' sekmesi atlandı (eksik/uyumsuz register() çıktısı).")
+            continue
+
+        specs.append(spec_dict)
+
+    # Sıralama: önce tercih listesi, sonra 'order', sonra 'title'
+    def _sort_key(x: Dict[str, Any]) -> tuple:
+        pref_idx = order_pref.index(x["key"]) if x["key"] in order_pref else len(order_pref)
+        return (pref_idx, int(x.get("order", 99)), str(x.get("title", "")))
+
+    specs.sort(key=_sort_key)
+
+    # Tanı amaçlı kısa bilgi
+    if specs:
+        try:
+            st.caption("Yüklenen sekmeler: " + ", ".join(s.get("key", "?") for s in specs))
+        except Exception:
+            pass
+
     return specs
-
 
 def _safe_render(render_fn, services: Dict[str, Any] | None = None):
     """
