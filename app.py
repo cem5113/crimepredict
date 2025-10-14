@@ -5,6 +5,24 @@ import importlib, importlib.util, sys
 from core.data_boot import configure_artifact_env
 configure_artifact_env()
 
+import streamlit as st, pkgutil, importlib, pathlib
+
+def discover_tabs():
+    tabs = []
+    pkg_path = pathlib.Path("tabs")
+    for _, name, ispkg in pkgutil.iter_modules([pkg_path.as_posix()]):
+        if not ispkg:  # klasör olmalı
+            continue
+        mod = importlib.import_module(f"tabs.{name}")
+        if hasattr(mod, "register"):
+            tabs.append(mod.register())
+    return sorted(tabs, key=lambda t: t.get("order", 999))
+
+tabs = discover_tabs()
+labels = [t["label"] for t in tabs]
+sel = st.sidebar.radio("Menü", labels, index=0)
+tabs[labels.index(sel)]["render"]()
+
 st.set_page_config(page_title="Suç Tahmini", page_icon="🔎", layout="wide")
 
 def _discover_tabs():
