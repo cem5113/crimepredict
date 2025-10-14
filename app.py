@@ -1,11 +1,4 @@
-# Streamlit — Suç Risk Haritası (Günlük)
-# ------------------------------------------------------------
-# Bu uygulama açıldığında veriyi **otomatik** olarak GitHub Actions
-# artifact'inden indirir: `cem5113/crime_prediction_data` → `sf-crime-parquet.zip`.
-# Zip içinden `risk_hourly.parquet` (veya `risk_hourly.csv`) okunur,
-# hour_range göz ardı edilip **GÜNLÜK ortalama** risk hesaplanır ve
-# GEOID bazında 4 seviyeli (low/medium/high/critical) bir harita üretilir.
-# ------------------------------------------------------------
+# SUTAM - Suç Tahmin Modeli
 
 import io
 import os
@@ -151,6 +144,7 @@ def classify_quantiles(daily_df: pd.DataFrame, day: date) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def load_geojson(uploaded_geojson) -> dict:
+    # Manuel yükleme yolunu koruyoruz (yan panelde opsiyonel)
     if uploaded_geojson is None:
         return {}
     return json.load(uploaded_geojson)
@@ -273,13 +267,60 @@ if not one_day.empty:
     with c2: st.metric("Q50", f"{one_day['q50'].iloc[0]:.4f}")
     with c3: st.metric("Q75", f"{one_day['q75'].iloc[0]:.4f}")
 
-# GeoJSON girişi (manuel)
+# GeoJSON — otomatik getir + manuel seçenek
+@st.cache_data(show_spinner=True, ttl=60*60)
+def fetch_geojson_auto() -> dict:
+    """Sırayla dener:
+    1) Artifact ZIP içinde `sf_tracts.geojson` (veya secrets: geojson_path)
+    2) Repo contents API (OWNER/REPO içindeki geojson_path)
+    3) Secrets: geojson_url doğrudan indir
+    """
+    path = st.secrets.get("geojson_path", "sf_tracts.geojson")
+    url_override = st.secrets.get("geojson_url", "")
+
+    # 1) Artifact içinden dene
+    try:
+        zip_bytes = fetch_latest_artifact_zip(OWNER, REPO, ARTIFACT_NAME)
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            memlist = zf.namelist()
+            cand = path if path in memlist else None
+            if cand:
+                with zf.open(cand) as f:
+                    return json.load(io.TextIOWrapper(f, encoding="utf-8"))
+    except Exception:
+        pass
+
+    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
+
+    # 2) Repo contents API
+    try:
+        api = f"https://api.github.com/repos/{OWNER}/{REPO}/contents/{path}"
+        r = requests.get(api, headers=headers, timeout=30)
+        if r.status_code == 200:
+            b64 = r.json().get('content', '')
+            if b64:
+                import base64
+                data = base64.b64decode(b64)
+                return json.loads(data.decode('utf-8'))
+    except Exception:
+        pass
+
+    # 3) Direkt URL override
+    if url_override:
+        r = requests.get(url_override, headers=headers if GITHUB_TOKEN else None, timeout=30)
+        if r.status_code == 200:
+            return r.json()
+
+    return {}
+
+# Manuel yükleme opsiyonu
 st.sidebar.header("Harita Sınırları (GeoJSON)")
 geojson_file = st.sidebar.file_uploader(
-    "GEOID içeren SF GeoJSON (tract/mahalle)",
+    "(Opsiyonel) GEOID içeren GeoJSON yükle",
     type=["json", "geojson"],
 )
-geojson = load_geojson(geojson_file)
+
+geojson = load_geojson(geojson_file) if geojson_file else fetch_geojson_auto()
 
 st.subheader(f"Harita — {sel_date}")
 if not geojson:
