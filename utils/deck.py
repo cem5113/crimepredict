@@ -74,9 +74,6 @@ def _ensure(df_like) -> pd.DataFrame:
 
     return d
 
-
-# crimepredict/utils/deck.py
-
 def _collapse_24h(df: pd.DataFrame) -> pd.DataFrame:
     """
     date / hour_range vb. tekrarları yok sayıp GEOID bazında 24 saatlik
