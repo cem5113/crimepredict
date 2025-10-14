@@ -75,6 +75,38 @@ def _ensure(df_like) -> pd.DataFrame:
     return d
 
 
+# crimepredict/utils/deck.py
+
+def _collapse_24h(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    date / hour_range vb. tekrarları yok sayıp GEOID bazında 24 saatlik
+    ortalama risk_score ve pred_expected üretir.
+    """
+    d = df.copy()
+    if "risk_score" in d.columns:
+        d["risk_score"] = pd.to_numeric(d["risk_score"], errors="coerce").clip(0, 1)
+    if "pred_expected" not in d.columns:
+        base = (
+            d["expected"] if "expected" in d.columns else
+            d["risk_score"] if "risk_score" in d.columns else 0.0
+        )
+        d["pred_expected"] = pd.to_numeric(base, errors="coerce").fillna(0.0)
+
+    keep_first = lambda s: s.iloc[0] if len(s) else ""
+    agg = {
+        "risk_score": "mean",
+        "pred_expected": "mean",
+        "neighborhood": keep_first if "neighborhood" in d.columns else "first",
+    }
+    cols = [c for c in agg.keys() if c in d.columns]
+    g = d.groupby(KEY_COL, as_index=False)[cols].agg(agg)
+    g.rename(columns={
+        "risk_score": "risk_score",          # isim aynı kalsın
+        "pred_expected": "pred_expected",    # isim aynı kalsın
+    }, inplace=True)
+    return g
+
+
 def build_map_fast_deck(
     df_agg: pd.DataFrame,
     geo_df: pd.DataFrame,
@@ -85,7 +117,9 @@ def build_map_fast_deck(
     show_risk_layer: bool = True,
     map_style: str = "mapbox://styles/mapbox/dark-v11",
     initial_view: Optional[Dict[str, float]] = None,
+    aggregate_24h: bool = True,   # <<< YENİ: 24 saat agregasyon anahtarımız
 ) -> pdk.Deck:
+
     if df_agg is None or len(df_agg) == 0:
         return pdk.Deck(
             map_style=map_style,
@@ -97,16 +131,25 @@ def build_map_fast_deck(
             layers=[],
         )
 
-    data = _ensure(df_agg)
+    # --- 24 saatlik ortalamaya indir (date/hour_range'i yok say) ---
+    data_in = pd.DataFrame(df_agg)
+    if aggregate_24h:
+        data_in = _collapse_24h(data_in)
+
+    # --- downstream beklediği formatı üret ---
+    data = _ensure(data_in)   # risk_level yoksa burada üretilecek
+
     layers: list[pdk.Layer] = []
 
-    # --- GEOID merkezlerine göre renkli risk katmanı ---
+    # --- Risk noktaları katmanı ---
     if show_risk_layer:
         centers = (
             data.merge(
                 geo_df[[KEY_COL, "centroid_lat", "centroid_lon"]],
                 on=KEY_COL, how="left"
-            ).dropna(subset=["centroid_lat", "centroid_lon"]).copy()
+            )
+            .dropna(subset=["centroid_lat", "centroid_lon"])
+            .copy()
         )
         centers["_color"] = centers["risk_level"].map(lambda k: _PALETTE.get(k, _DEF))
         layers.append(pdk.Layer(
@@ -120,7 +163,7 @@ def build_map_fast_deck(
             get_fill_color="_color",
         ))
 
-    # --- Isı katmanı (opsiyonel) ---
+    # --- Isı katmanı (varsa) ---
     if show_temp_hotspot and isinstance(temp_hotspot_points, pd.DataFrame) and not temp_hotspot_points.empty:
         pts = temp_hotspot_points.copy()
         lc = {c.lower(): c for c in pts.columns}
@@ -139,7 +182,7 @@ def build_map_fast_deck(
                 aggregation="SUM",
             ))
 
-    # --- Güçlü hotspot işaretleyicileri (üst %10) ---
+    # --- Üst %10 hotspot işaretleyicileri (pred_expected ort.) ---
     if show_hotspot and "pred_expected" in data.columns:
         x = pd.to_numeric(data["pred_expected"], errors="coerce").fillna(0.0).to_numpy()
         mask = np.isfinite(x)
@@ -164,11 +207,12 @@ def build_map_fast_deck(
         "html": (
             f"<b>{KEY_COL}:</b> {{{KEY_COL}}}<br>"
             "<b>Mahalle:</b> {neighborhood}<br>"
-            "<b>E[olay]:</b> {pred_expected_fmt}<br>"
+            "<b>E[olay] (24s ort.):</b> {pred_expected_fmt}<br>"
             "<b>Risk seviyesi:</b> {risk_level}"
         ),
         "style": {"backgroundColor": "rgba(0,0,0,0.78)", "color": "white"},
     }
+
     view = pdk.ViewState(
         latitude=(initial_view or {}).get("lat", 37.7749),
         longitude=(initial_view or {}).get("lon", -122.4194),
