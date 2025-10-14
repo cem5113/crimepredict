@@ -1,106 +1,54 @@
 from __future__ import annotations
-from typing import Tuple
-import json
+import streamlit as st
 import pandas as pd
-from pathlib import Path
+from folium import Map
+from folium.plugins import HeatMap
+from streamlit_folium import st_folium
 
-from config.settings import DEFAULT_PARQUET, DEFAULT_CSV, SF_CELLS_GEOJSON
-from utils.constants import KEY_COL, RISK_COL, TIME_COL, DATE_COL
+from core.data import load_risk_df, daily_mean, load_geoid_centroids, attach_latlon
+from utils.constants import KEY_COL, RISK_COL, DATE_COL
 
-# -------- GEOID & risk yardımcıları --------
-def fix_geoid(s: pd.Series) -> pd.Series:
-    s = pd.Series(s).astype(str).str.strip()
-    s = s.str.replace(r'\.0$', '', regex=True)
-    s = s.str.replace(r'^\s*nan\s*$', '', regex=True)
-    s = s.str.replace(r'[^0-9]', '', regex=True)
-    # uzunluk sabitse (örn 11) şunu aç: s = s.str.zfill(11)
-    return s
+st.set_page_config(page_title="SF Crime Risk", layout="wide")
+st.title("🗺️ SF Crime Risk — Günlük Özet")
 
-def coerce_risk(s: pd.Series) -> pd.Series:
-    return pd.to_numeric(s, errors="coerce").astype("float64")
+raw = load_risk_df()
+if raw.empty:
+    st.warning("Veri kaynağı bulunamadı veya boş. Lütfen `data/` içine `risk_hourly.parquet` veya `risk_hourly.csv` koy.")
+    st.stop()
 
-# -------- veri yükleme --------
-def load_risk_df() -> pd.DataFrame:
-    p_parq = Path(DEFAULT_PARQUET)
-    p_csv = Path(DEFAULT_CSV)
+st.success(f"Yüklendi: {len(raw):,} satır")
+g = daily_mean(raw)
 
-    if p_parq.exists():
-        df = pd.read_parquet(p_parq)
-    elif p_csv.exists():
-        df = pd.read_csv(p_csv)
-    else:
-        raise FileNotFoundError("Kaynak bulunamadı: risk_hourly.parquet/csv yok.")
+cents = load_geoid_centroids()          # artık FileNotFoundError atmaz
+g = attach_latlon(g, cents)             # eksikse NaN ekler
+g = g.dropna(subset=[RISK_COL])         # risk NaN olanları at
 
-    # beklenen kolonlar: GEOID + risk_score (+ opsiyonel timestamp/date)
-    if KEY_COL not in df.columns:
-        raise KeyError(f"Beklenen kolon yok: {KEY_COL}")
-    if RISK_COL not in df.columns:
-        # bazı setlerde "risk_level" olabilir → dönüştür
-        guess = "risk_level" if "risk_level" in df.columns else None
-        if guess is None:
-            raise KeyError(f"Beklenen kolon yok: {RISK_COL}")
-        df[RISK_COL] = df[guess]
+if g.empty:
+    st.warning("Özet veri boş.")
+    st.stop()
 
-    df[KEY_COL] = fix_geoid(df[KEY_COL])
-    df[RISK_COL] = coerce_risk(df[RISK_COL])
-    return df
+dates = sorted(g[DATE_COL].dropna().unique())
+sel_date = dates[-1] if dates else pd.Timestamp("today").date()
+sel_date = st.selectbox("Gün seç", options=dates or [sel_date], index=(len(dates)-1 if dates else 0))
+gday = g[g[DATE_COL] == sel_date].copy()
 
-# -------- günlük özet (aynı date ortalaması) --------
-def daily_mean(df: pd.DataFrame) -> pd.DataFrame:
-    d = df.copy()
+st.write("Seçilen günde hücre sayısı:", len(gday))
 
-    if DATE_COL in d.columns:
-        d[DATE_COL] = pd.to_datetime(d[DATE_COL]).dt.date
-    elif TIME_COL in d.columns:
-        d[DATE_COL] = pd.to_datetime(d[TIME_COL]).dt.date
-    else:
-        # tarih yoksa tek “gün” gibi davran: sabit bugünün tarihi
-        d[DATE_COL] = pd.Timestamp("today").date()
+# Harita sadece lat/lon mevcutsa çizilir
+has_geo = gday["latitude"].notna().any() and gday["longitude"].notna().any()
 
-    g = (d.groupby([KEY_COL, DATE_COL], as_index=False)
-           .agg({RISK_COL: "mean"}))
-    return g
+if has_geo:
+    m = Map(location=[37.7749, -122.4194], zoom_start=12, control_scale=True)
+    heat_data = gday[["latitude", "longitude", RISK_COL]].dropna().values.tolist()
+    if heat_data:
+        HeatMap(heat_data, radius=12, max_zoom=14).add_to(m)
+    st_folium(m, width=1100, height=650)
+else:
+    st.info("GeoJSON bulunamadı veya centroidler eksik → harita pas geçildi (sadece tablo).")
 
-# -------- GEOID → (lat, lon) centroid eşleştirme --------
-def _poly_centroid(coords) -> Tuple[float, float]:
-    # Koordinatları flatten edip kaba ortalama al (hızlı, depsiz)
-    xs, ys = [], []
-    def walk(obj):
-        if isinstance(obj[0], (float, int)):
-            # [lon, lat]
-            xs.append(float(obj[0])); ys.append(float(obj[1]))
-        else:
-            for k in obj: walk(k)
-    walk(coords)
-    if not xs:
-        return 0.0, 0.0
-    return float(sum(ys)/len(ys)), float(sum(xs)/len(xs))  # (lat, lon)
-
-def load_geoid_centroids(geojson_path: str | Path = SF_CELLS_GEOJSON) -> pd.DataFrame:
-    p = Path(geojson_path)
-    if not p.exists():
-        raise FileNotFoundError(f"GeoJSON bulunamadı: {p}")
-    with open(p, "r", encoding="utf-8") as f:
-        gj = json.load(f)
-
-    rows = []
-    for feat in gj.get("features", []):
-        props = feat.get("properties", {})
-        geoid = str(props.get(KEY_COL, "")).strip()
-        geoid = geoid.replace(".0", "")
-        if not geoid:
-            continue
-        geom = feat.get("geometry", {}) or {}
-        coords = geom.get("coordinates", [])
-        lat, lon = _poly_centroid(coords)  # (lat, lon)
-        rows.append({KEY_COL: geoid, "latitude": lat, "longitude": lon})
-
-    df = pd.DataFrame(rows)
-    df[KEY_COL] = fix_geoid(df[KEY_COL])
-    return df
-
-def attach_latlon(df: pd.DataFrame, centroids: pd.DataFrame) -> pd.DataFrame:
-    if df.empty or centroids.empty:
-        return df
-    out = df.merge(centroids, on=KEY_COL, how="left")
-    return out
+with st.expander("Veri tablosu"):
+    st.dataframe(
+        gday[[KEY_COL, DATE_COL, RISK_COL, "latitude", "longitude"]]
+        .sort_values(RISK_COL, ascending=False)
+        .head(500)
+    )
