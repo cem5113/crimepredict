@@ -1,101 +1,53 @@
 # app.py
-import streamlit as st
+from __future__ import annotations
+import streamlit as st, pkgutil, importlib, pathlib, importlib.util, sys
 from pathlib import Path
-import importlib, importlib.util, sys
 from core.data_boot import configure_artifact_env
 configure_artifact_env()
-
-import streamlit as st, pkgutil, importlib, pathlib
-
-def discover_tabs():
-    tabs = []
-    pkg_path = pathlib.Path("tabs")
-    for _, name, ispkg in pkgutil.iter_modules([pkg_path.as_posix()]):
-        if not ispkg:  # klasör olmalı
-            continue
-        mod = importlib.import_module(f"tabs.{name}")
-        if hasattr(mod, "register"):
-            tabs.append(mod.register())
-    return sorted(tabs, key=lambda t: t.get("order", 999))
-
-tabs = discover_tabs()
-labels = [t["label"] for t in tabs]
-sel = st.sidebar.radio("Menü", labels, index=0)
-tabs[labels.index(sel)]["render"]()
 
 st.set_page_config(page_title="Suç Tahmini", page_icon="🔎", layout="wide")
 
 def _discover_tabs():
-    """
-    Sekmeleri sağlam biçimde bul ve yükle:
-    1) crimepredict.tabs.<name>
-    2) <paket_adı>.tabs.<name>  (dosya konumundan türetilir)
-    3) Path'ten yükleme (spec_from_file_location) — relative importlar çalışsın
-    """
     here = Path(__file__).resolve()
-    pkg_root = here.parent.parent              # projenin kökü
-    tabs_dir = here.parent / "tabs"            # crimepredict/tabs
+    pkg_root = here.parent.parent
+    tabs_dir = here.parent / "tabs"
     specs = []
     if not tabs_dir.exists():
         return specs
-
-    # PYTHONPATH'e kökü ekle (import için)
     if str(pkg_root) not in sys.path:
         sys.path.insert(0, str(pkg_root))
-
-    # Dosya konumundan paket adını çıkar (örn. 'crimepredict')
     pkg_name = here.parent.name
 
     for sub in sorted(tabs_dir.iterdir()):
-        if not sub.is_dir():
-            continue
+        if not sub.is_dir(): continue
         init_py = sub / "__init__.py"
-        if not init_py.exists():
-            continue
+        if not init_py.exists(): continue
 
         mod = None
-        errors = []
-
-        # 1) En yaygın: crimepredict.tabs.<name>
-        cand1 = f"crimepredict.tabs.{sub.name}"
+        # 1) crimepredict.tabs.<name>
         try:
-            mod = importlib.import_module(cand1)
-        except Exception as e:
-            errors.append(f"{cand1}: {e}")
-
-        # 2) Dosya konumundan türetilen paket adı
-        if mod is None:
-            cand2 = f"{pkg_name}.tabs.{sub.name}"
-            try:
-                mod = importlib.import_module(cand2)
-            except Exception as e:
-                errors.append(f"{cand2}: {e}")
-
-        # 3) Son çare: path'ten yükle (paket adını vererek)
+            mod = importlib.import_module(f"crimepredict.tabs.{sub.name}")
+        except Exception:
+            pass
+        # 2) <pkg_name>.tabs.<name>
         if mod is None:
             try:
-                name = f"{pkg_name}.tabs.{sub.name}"
-                spec = importlib.util.spec_from_file_location(name, init_py)
+                mod = importlib.import_module(f"{pkg_name}.tabs.{sub.name}")
+            except Exception:
+                pass
+        # 3) path'ten yükle
+        if mod is None:
+            spec = importlib.util.spec_from_file_location(f"{pkg_name}.tabs.{sub.name}", init_py)
+            if spec and spec.loader:
                 mod = importlib.util.module_from_spec(spec)
-                sys.modules[name] = mod
-                assert spec and spec.loader
+                sys.modules[f"{pkg_name}.tabs.{sub.name}"] = mod
                 spec.loader.exec_module(mod)  # type: ignore
-            except Exception as e:
-                errors.append(f"spec-load {sub.name}: {e}")
 
-        if mod is None:
-            st.error(f"Sekme yüklenemedi: {sub.name} → {' | '.join(errors)}")
-            continue
+        if mod and hasattr(mod, "register"):
+            specs.append(mod.register())
 
-        if hasattr(mod, "register"):
-            try:
-                specs.append(mod.register())
-            except Exception as e:
-                st.error(f"Sekme register() hatası: {sub.name} → {e}")
-
-    # Sıra: home, forecast, planning, stats, reports (varsa)
-    order = ["home", "forecast", "planning", "stats", "reports"]
-    specs.sort(key=lambda x: order.index(x["key"]) if x["key"] in order else 99)
+    order = ["home", "forecast", "planning", "stats", "reports", "diagnostics"]
+    specs.sort(key=lambda x: order.index(x["key"]) if x["key"] in order else x.get("order", 99))
     return specs
 
 def main():
@@ -105,10 +57,9 @@ def main():
         st.stop()
 
     active = st.session_state.get("__active_tab__", tabs[0]["key"])
-
     with st.sidebar:
         st.header("Menü")
-        labels = [f"{t['icon']} {t['title']}" for t in tabs]
+        labels = [f"{t.get('icon','🗂️')} {t.get('title', t.get('label','Sekme'))}" for t in tabs]
         keys   = [t["key"] for t in tabs]
         idx = keys.index(active) if active in keys else 0
         choice = st.radio("Sekme", labels, index=idx, label_visibility="collapsed")
@@ -116,6 +67,7 @@ def main():
         st.session_state["__active_tab__"] = active
 
     current = next(t for t in tabs if t["key"] == active)
+    # render imzasını esnek yapıyoruz (aşağıda tabs yamaları var)
     current["render"](state=None, services=None)
 
 if __name__ == "__main__":
