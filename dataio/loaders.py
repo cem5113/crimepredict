@@ -61,6 +61,68 @@ GEOID_LEN = int(os.getenv("GEOID_LEN", "11"))
 REQUIRED_COLS: List[str] = ["GEOID", "date", "event_hour"]
 
 # ===================== helpers =====================
+# loaders.py içine ekle (helpers bölümünün altı uygun)
+def _attach_geo_centroids(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    GEOID tabanlı centroid lat/lon'u ekler.
+    Öncelik:
+      - Varsa mevcut 'lat'/'lon' korunur (numeric'e coerced edilir)
+      - Yoksa sf_cells.geojson içindeki centroid'lerden doldurulur
+      - Yine yoksa boş (NaN) Series oluşturulur (downstream .fillna güvenle çalışır)
+    """
+    out = df.copy()
+
+    # lat/lon kolonlarını numeric yap (varsa)
+    if "lat" in out.columns:
+        out["lat"] = pd.to_numeric(out["lat"], errors="coerce")
+    if "lon" in out.columns:
+        out["lon"] = pd.to_numeric(out["lon"], errors="coerce")
+
+    # GEOJSON yolu: crimepredict/data/sf_cells.geojson
+    geojson_path = Path(__file__).resolve().parents[1] / "data" / "sf_cells.geojson"
+    if geojson_path.exists():
+        try:
+            raw = json.loads(geojson_path.read_text(encoding="utf-8"))
+            feats = raw.get("features", [])
+            if feats:
+                # properties.geoid, properties.centroid_lat/lon'ı al
+                rows = []
+                for f in feats:
+                    props = f.get("properties", {})
+                    geoid = str(props.get("geoid", "")).strip()
+                    clat = props.get("centroid_lat", None)
+                    clon = props.get("centroid_lon", None)
+                    if geoid:
+                        rows.append((geoid, clat, clon))
+                if rows:
+                    gdf = pd.DataFrame(rows, columns=["GEOID", "centroid_lat", "centroid_lon"])
+                    # GEOID normalize (11 hane)
+                    gdf["GEOID"] = gdf["GEOID"].astype(str).str.extract(r"(\d+)", expand=False).str[:GEOID_LEN].str.zfill(GEOID_LEN)
+                    # join
+                    out["GEOID"] = out["GEOID"].astype(str).str.extract(r"(\d+)", expand=False).str[:GEOID_LEN].str.zfill(GEOID_LEN)
+                    out = out.merge(gdf, on="GEOID", how="left")
+
+                    # lat/lon yoksa centroid'ten doldur
+                    if "lat" not in out.columns:
+                        out["lat"] = pd.to_numeric(out["centroid_lat"], errors="coerce")
+                    else:
+                        out["lat"] = out["lat"].fillna(pd.to_numeric(out["centroid_lat"], errors="coerce"))
+
+                    if "lon" not in out.columns:
+                        out["lon"] = pd.to_numeric(out["centroid_lon"], errors="coerce")
+                    else:
+                        out["lon"] = out["lon"].fillna(pd.to_numeric(out["centroid_lon"], errors="coerce"))
+        except Exception as e:
+            # Sessiz geç; downstream guard'lar devam eder
+            print("sf_cells.geojson okunamadı:", e)
+
+    # Eğer hâlâ yoksa boş Series oluştur (float dtype)
+    if "lat" not in out.columns:
+        out["lat"] = pd.Series([pd.NA] * len(out), index=out.index, dtype="float")
+    if "lon" not in out.columns:
+        out["lon"] = pd.Series([pd.NA] * len(out), index=out.index, dtype="float")
+
+    return out
 
 
 def _headers(require_auth: bool = False) -> Optional[Dict[str, str]]:
