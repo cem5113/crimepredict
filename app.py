@@ -162,60 +162,57 @@ def load_geojson(uploaded_geojson) -> dict:
 
 
 def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
-    """Seçilen gün risk metriklerini GeoJSON özelliklerine ekler (GEOID eşlemesi)."""
-    if not geojson_dict:
-        return {}
-    props_key_candidates = ['GEOID', 'geoid', 'cell_id']
+    """Günlük risk metriklerini GeoJSON'a ekler (ID normalize + zfill)."""
+    if not geojson_dict or day_df.empty:
+        return geojson_dict
 
-    # Hedef uzunluğu (GeoJSON ID uzunluğu) tahmin et
-lengths = []
-for _feat in geojson_dict.get('features', [])[:200]:
-    _props = _feat.get('properties', {}) or {}
-    for _k in ['GEOID','geoid','cell_id','id']:
-        if _k in _props:
-            _val = str(_props[_k])
-            if _val.isdigit():
-                lengths.append(len(_val))
-            break
-target_len = max(set(lengths), key=lengths.count) if lengths else None
+    # GeoJSON'da en sık görülen sayısal ID uzunluğu (örn. 12)
+    target_len = _detect_geojson_id_len(geojson_dict)
 
-# Risk tarafını normalize et (sadece rakam + zfill)
-day_df = day_df.copy()
-day_df['geoid'] = day_df['geoid'].astype(str).str.replace(r'\D','', regex=True)
-if target_len:
-    day_df['geoid'] = day_df['geoid'].str.zfill(target_len)
+    # risk tarafını normalize et
+    day_df = day_df.copy()
+    day_df["geoid"] = (
+        day_df["geoid"].astype(str).str.replace(r"\D", "", regex=True).str.zfill(target_len or 0)
+    )
+    dmap = day_df.set_index("geoid")
 
-dmap = day_df.set_index(day_df['geoid'])
     features_out = []
-    for feat in geojson_dict.get('features', []):
-        props = feat.get('properties', {}) or {}
-        geoid_prop = None
-        for k in props_key_candidates:
-            if k in props:
-                geoid_prop = props[k]
+    for feat in geojson_dict.get("features", []):
+        props = (feat.get("properties") or {}).copy()
+
+        # GeoJSON tarafındaki anahtar
+        key_raw = None
+        for cand in ("geoid", "GEOID", "cell_id", "id"):
+            if cand in props:
+                key_raw = str(props[cand])
                 break
-        if geoid_prop is None:
+        if not key_raw:
             features_out.append(feat)
             continue
-        key = str(geoid_prop)
-# özellik değerini de normalize et (sadece rakam + zfill)
-key_norm = ''.join(ch for ch in key if ch.isdigit())
-if target_len:
-    key_norm = key_norm.zfill(target_len)
 
-if key_norm in dmap.index:
-            row = dmap.loc[key]
+        # normalize + zfill
+        key_norm = "".join(ch for ch in key_raw if ch.isdigit())
+        if target_len:
+            key_norm = key_norm.zfill(target_len)
+
+        # eşleşme varsa metrikleri enjekte et
+        if key_norm in dmap.index:
+            row = dmap.loc[key_norm]
             if isinstance(row, pd.DataFrame):
                 row = row.iloc[0]
-            props = {
-                **props,
-                'risk_score_daily': float(row['risk_score_daily']),
-                'risk_level': row['risk_level'],
-            }
-        feat_out = {**feat, 'properties': props}
-        features_out.append(feat_out)
 
-    return {**geojson_dict, 'features': features_out}
+            # tooltip için gösterilecek tekil ID ve formatlı skor
+            disp = props.get("GEOID") or props.get("geoid") or props.get("cell_id") or props.get("id")
+            props.update({
+                "display_id": disp,
+                "risk_score_daily": float(row["risk_score_daily"]),
+                "risk_level": row["risk_level"],
+                "risk_score_txt": f"{float(row['risk_score_daily']):.4f}",
+            })
+
+        features_out.append({**feat, "properties": props})
+
+    return {**geojson_dict, "features": features_out}
 
 
 def make_map(geojson_enriched: dict, initial_view=None):
