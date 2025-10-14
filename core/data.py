@@ -261,10 +261,15 @@ def sample_for_map(limit: int = 50000) -> pd.DataFrame:
         # lat/lon hiç yoksa harita çizemeyiz → boş şablon döndür
         return pd.DataFrame(columns=REQUIRED_COLS)
 
-    # risk_score'u normalize et (yoksa 1.0)
+    # risk_score'u güvenle normalize et (her durumda Series yapısı garanti)
     if "risk_score" in df.columns:
-        df["risk_score"] = pd.to_numeric(df["risk_score"], errors="coerce").fillna(0.0).clip(0, 1)
+        rv = pd.to_numeric(df["risk_score"], errors="coerce")
+        if not isinstance(rv, pd.Series):  # olası float dönüşümüne karşı koruma
+            rv = pd.Series(rv, index=df.index, dtype="float64")
+        df["risk_score"] = rv.fillna(0.0).clip(0, 1)
     else:
-        df["risk_score"] = 1.0
+        # Kolon yoksa tüm satırlara Series halinde 1.0 ata
+        df["risk_score"] = pd.Series(1.0, index=df.index, dtype="float64")
+
 
     return df
