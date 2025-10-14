@@ -42,11 +42,31 @@ GITHUB_TOKEN = st.secrets.get("github_token", os.environ.get("GITHUB_TOKEN", "")
 
 @st.cache_data(show_spinner=True, ttl=15*60)
 def fetch_latest_artifact_zip(owner: str, repo: str, artifact_name: str) -> bytes:
-"""Repo'daki son **geçerli** (expired=false) artifact'i bulur ve ZIP bytes döndürür."""
-if not GITHUB_TOKEN:
-raise RuntimeError(
-"GitHub token bulunamadı. lütfen st.secrets['github_token'] veya GITHUB_TOKEN env. değişkeni ayarlayın.")
+    """Repo'daki son **geçerli** (expired=false) artifact'i bulur ve ZIP bytes döndürür."""
+    if not GITHUB_TOKEN:
+        raise RuntimeError(
+            "GitHub token bulunamadı. lütfen st.secrets['github_token'] veya GITHUB_TOKEN env. değişkeni ayarlayın."
+        )
 
+    base = f"https://api.github.com/repos/{owner}/{repo}/actions/artifacts"
+    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
+
+    r = requests.get(base, headers=headers, timeout=30)
+    r.raise_for_status()
+    items = r.json().get("artifacts", [])
+    cand = [a for a in items if a.get("name") == artifact_name and not a.get("expired", False)]
+    if not cand:
+        raise FileNotFoundError(f"Artifact bulunamadı: {artifact_name}")
+    cand.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+    artifact = cand[0]
+
+    download_url = artifact.get("archive_download_url")
+    if not download_url:
+        raise RuntimeError("archive_download_url bulunamadı")
+
+    r2 = requests.get(download_url, headers=headers, timeout=60)
+    r2.raise_for_status()
+    return r2.content
 
 base = f"https://api.github.com/repos/{owner}/{repo}/actions/artifacts"
 headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
