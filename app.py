@@ -1,9 +1,7 @@
 # SUTAM - Suç Tahmin Modeli
 
-
 path = st.session_state.get('geojson_path_ui') or st.secrets.get("geojson_path", "sf_cells.geojson")
 url_override = st.secrets.get("geojson_url", "")
-
 
 # 1) Artifact içinden dene
 try:
