@@ -16,13 +16,31 @@ LEVEL_MAP = {
     "low": 0, "l": 0,
 }
 
-def _coerce_risk_level(s: pd.Series) -> pd.Series:
-    """risk_level'i güvenle numerik'e çevirir; metinleri LEVEL_MAP ile mapler."""
-    if pd.api.types.is_numeric_dtype(s):
-        return pd.to_numeric(s, errors="coerce")
+def _seriesify(x):
+    return x if isinstance(x, pd.Series) else pd.Series([x])
+
+def _coerce_geoid(s) -> pd.Series:
+    s = _seriesify(s)
+    s = s.astype("string")
+    s = s.str.strip()
+    # ".0" uçları ve float kaynaklı sorunları temizle
+    s = s.str.replace(r"\.0$", "", regex=True)
+    # sadece rakam bırak
+    s = s.str.replace(r"[^\d]", "", regex=True)
+    # boşları NA yap
+    s = s.replace("", pd.NA)
+    return s
+
+def _coerce_risk_level(s) -> pd.Series:
+    """risk_level'i güvenle numerik'e çevirir; metinleri LEVEL_MAP ile mapler (scalar veya Series)."""
+    s = _seriesify(s)
     s_str = s.astype(str).str.strip().str.lower()
+    # metinleri LEVEL_MAP ile çevir
+    mapped = s_str.map(LEVEL_MAP).astype("Float64")
+    # doğrudan sayı gibi görünüyor ise al
     num = pd.to_numeric(s_str, errors="coerce")
-    if num.notna().any():
+    out = mapped.fillna(num)
+    return out.astype("Float64")
         return num
     return s_str.map(LEVEL_MAP).astype("float32")
 
