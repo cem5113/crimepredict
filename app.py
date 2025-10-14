@@ -235,7 +235,6 @@ def make_map(geojson_enriched: dict):
         st.info("Haritayı görmek için GeoJSON bulunamadı.")
         return
 
-    # low=yeşil, medium=sarı, high=turuncu, critical=kırmızı
     color_expr = [
         "case",
         ["==", ["get", "risk_level"], "low"], [56, 168, 0],
@@ -256,10 +255,10 @@ def make_map(geojson_enriched: dict):
     )
 
     tooltip = {
-        "text": "ID: {display_id}\nRisk: {risk_level}\nSkor: {risk_score_txt}"
-    }
+        "text": "ID: {display_id}\nRisk: {risk_level}\nSkor: {risk_score_txt}",
         "style": {"backgroundColor": "#262730", "color": "white"},
     }
+
     deck = pdk.Deck(
         layers=[layer],
         initial_view_state=pdk.ViewState(latitude=37.7749, longitude=-122.4194, zoom=10),
@@ -267,7 +266,6 @@ def make_map(geojson_enriched: dict):
         tooltip=tooltip,
     )
     st.pydeck_chart(deck, use_container_width=True)
-
 # ------------------------------------------------------------
 # UI
 # ------------------------------------------------------------
