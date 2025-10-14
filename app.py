@@ -160,13 +160,29 @@ def load_geojson(uploaded_geojson) -> dict:
         return {}
     return json.load(uploaded_geojson)
 
+def _detect_geojson_id_len(gj: dict) -> int | None:
+    """GeoJSON'da en sık görülen sayısal ID uzunluğunu (örn. 12) bulur."""
+    if not gj:
+        return None
+    lens = []
+    for feat in gj.get("features", [])[:200]:
+        props = feat.get("properties", {}) or {}
+        for k in ("geoid", "GEOID", "cell_id", "id"):
+            if k in props:
+                digits = "".join(ch for ch in str(props[k]) if ch.isdigit())
+                if digits:
+                    lens.append(len(digits))
+                break
+    if not lens:
+        return None
+    # moda
+    return max(set(lens), key=lens.count)
 
 def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
     """Günlük risk metriklerini GeoJSON'a ekler (ID normalize + zfill)."""
     if not geojson_dict or day_df.empty:
         return geojson_dict
 
-    # GeoJSON'da en sık görülen sayısal ID uzunluğu (örn. 12)
     target_len = _detect_geojson_id_len(geojson_dict)
 
     # risk tarafını normalize et
@@ -201,7 +217,7 @@ def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
             if isinstance(row, pd.DataFrame):
                 row = row.iloc[0]
 
-            # tooltip için gösterilecek tekil ID ve formatlı skor
+            # tooltip için tekil ID + formatlı skor
             disp = props.get("GEOID") or props.get("geoid") or props.get("cell_id") or props.get("id")
             props.update({
                 "display_id": disp,
@@ -213,7 +229,6 @@ def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
         features_out.append({**feat, "properties": props})
 
     return {**geojson_dict, "features": features_out}
-
 
 def make_map(geojson_enriched: dict):
     if not geojson_enriched:
@@ -248,7 +263,6 @@ def make_map(geojson_enriched: dict):
         ),
         "style": {"backgroundColor": "#262730", "color": "white"},
     }
-
     deck = pdk.Deck(
         layers=[layer],
         initial_view_state=pdk.ViewState(latitude=37.7749, longitude=-122.4194, zoom=10),
