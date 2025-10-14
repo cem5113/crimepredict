@@ -1,31 +1,48 @@
+import pandas as pd
 import streamlit as st
 from core.data import load_parquet
 from core.mapkit import home_deck
 
 TAB_KEY = "home"
 
+def _clean_geoid(s: pd.Series) -> pd.Series:
+    s = s.astype("string").str.strip()
+    s = s.str.replace(r"\.0$", "", regex=True)
+    s = s.str.replace(r"[^\d]", "", regex=True)
+    s = s.replace("", pd.NA)
+    return s
+
+def _level_from_score(s: pd.Series) -> pd.Series:
+    if s.empty:
+        return s.astype("Float64")
+    q1, q2, q3 = s.quantile([0.25, 0.50, 0.75])
+    lvl = pd.Series(0, index=s.index, dtype="int64")
+    lvl = lvl.mask(s > q1, 1)
+    lvl = lvl.mask(s > q2, 2)
+    lvl = lvl.mask(s > q3, 3)
+    return lvl.astype("int64")
+
 def render(state=None, services=None):
     st.title("🏠 Suç Tahmini — Ana Sayfa")
 
-    # Veri yükleme
     df = load_parquet("risk_hourly.parquet", columns=["geoid", "risk_score", "date", "hour_range"])
     if df is None or df.empty:
         st.warning("⚠️ Harita için uygun veri bulunamadı.")
         return
 
-    # Opsiyonel: Tarih ve saat filtresi
-    if "date" in df.columns and "hour_range" in df.columns:
-        dates = sorted(df["date"].dropna().astype(str).unique())
-        if dates:
-            sel_date = st.selectbox("📅 Tarih seç", dates, index=len(dates)-1)
-            hours = sorted(df.loc[df["date"].astype(str) == sel_date, "hour_range"].astype(str).unique())
-            sel_hour = st.selectbox("🕐 Saat aralığı", hours)
-            df = df[
-                (df["date"].astype(str) == sel_date)
-                & (df["hour_range"].astype(str) == sel_hour)
-            ]
+    df["geoid"] = _clean_geoid(df["geoid"])
+    df = df.dropna(subset=["geoid", "risk_score", "date"])
 
-    # Harita
+    latest_date = df["date"].max()
+    df = df[df["date"] == latest_date]
+
+    df = (
+        df.groupby("geoid", as_index=False)["risk_score"]
+          .mean()
+          .rename(columns={"risk_score": "risk_score"})
+    )
+    df["risk_level"] = _level_from_score(df["risk_score"]).astype("int64")
+
     try:
         st.pydeck_chart(home_deck(df))
     except Exception as e:
