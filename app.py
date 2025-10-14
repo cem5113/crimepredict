@@ -1,4 +1,4 @@
-# SUTAM - Suç Tahmin Modeli
+# SUTAM - Suç Tahmin Modeli (Parquet-only, CSV fallback kaldırıldı)
 
 import io
 import os
@@ -18,7 +18,6 @@ OWNER = "cem5113"
 REPO = "crime_prediction_data"
 ARTIFACT_NAME = "sf-crime-parquet"
 EXPECTED_PARQUET = "risk_hourly.parquet"
-EXPECTED_CSV = "risk_hourly.csv"
 
 # GeoJSON repo/yol (harita sınırları)
 GEOJSON_OWNER = st.secrets.get("geojson_owner", OWNER)
@@ -48,7 +47,6 @@ def _gh_headers():
         hdrs["Authorization"] = f"Bearer {GITHUB_TOKEN}"
     return hdrs
 
-
 # ------------------------------------------------------------
 # Artifact indirme ve okuma
 # ------------------------------------------------------------
@@ -75,7 +73,6 @@ def fetch_latest_artifact_zip(owner: str, repo: str, artifact_name: str) -> byte
     r2.raise_for_status()
     return r2.content
 
-
 @st.cache_data(show_spinner=True, ttl=15 * 60)
 def read_from_artifact(file_names: list[str]) -> dict[str, bytes]:
     """Artifact ZIP içinden istenen dosyaları (list halinde) döndürür: {ad: bytes}."""
@@ -93,32 +90,21 @@ def read_from_artifact(file_names: list[str]) -> dict[str, bytes]:
                 st.warning(f"{fname} ZIP içinde bulunamadı. İlk 10 dosya: {memlist[:10]}")
     return results
 
-
 @st.cache_data(show_spinner=True, ttl=15 * 60)
 def read_risk_from_artifact() -> pd.DataFrame:
-    """risk_hourly.parquet (yoksa CSV) -> DataFrame (kolonlar normalize)."""
-    wanted = [EXPECTED_PARQUET, EXPECTED_CSV]
-    files = read_from_artifact(wanted)
-    buf = None
-    target = None
-    for name in wanted:
-        if name in files:
-            buf = io.BytesIO(files[name])
-            target = name
-            break
-    if buf is None:
-        raise FileNotFoundError(f"Artifact'te {EXPECTED_PARQUET} veya {EXPECTED_CSV} bulunamadı.")
-    if target.endswith(".parquet"):
-        df = pd.read_parquet(buf)
-    else:
-        df = pd.read_csv(buf)
+    """Artifact ZIP içindeki risk_hourly.parquet -> DataFrame (kolonlar normalize)."""
+    files = read_from_artifact([EXPECTED_PARQUET])
+
+    if EXPECTED_PARQUET not in files:
+        raise FileNotFoundError(f"Artifact'te {EXPECTED_PARQUET} bulunamadı.")
+
+    df = pd.read_parquet(io.BytesIO(files[EXPECTED_PARQUET]))
 
     # Kolon adlarını normalize et
     df.columns = [c.strip().lower() for c in df.columns]
     if "date" in df.columns:
         df["date"] = pd.to_datetime(df["date"]).dt.date
     return df
-
 
 # ------------------------------------------------------------
 # GeoJSON getir (ayrı repo) + fallback raw
@@ -134,7 +120,6 @@ def fetch_geojson() -> dict:
             b64 = r.json().get("content", "")
             if b64:
                 import base64
-
                 data = base64.b64decode(b64)
                 return json.loads(data.decode("utf-8"))
     except Exception:
@@ -145,9 +130,7 @@ def fetch_geojson() -> dict:
     r = requests.get(raw, timeout=30)
     if r.status_code == 200:
         return r.json()
-
     return {}  # bulunamadı
-
 
 # ------------------------------------------------------------
 # Veri işleme
@@ -165,7 +148,6 @@ def daily_average(df: pd.DataFrame) -> pd.DataFrame:
         .rename(columns={"risk_score": "risk_score_daily"})
     )
     return out
-
 
 def classify_quantiles(daily_df: pd.DataFrame, day: date) -> pd.DataFrame:
     """Seçilen gün için low/medium/high/critical (Q25/Q50/Q75)."""
@@ -189,7 +171,6 @@ def classify_quantiles(daily_df: pd.DataFrame, day: date) -> pd.DataFrame:
     one["q75"] = q75
     return one
 
-
 def _detect_geojson_id_len(gj: dict) -> int | None:
     """GeoJSON'da en sık görülen sayısal ID uzunluğunu (örn. 12) bulur."""
     if not gj:
@@ -209,13 +190,13 @@ def _detect_geojson_id_len(gj: dict) -> int | None:
     # moda
     return max(set(lens), key=lens.count)
 
-
 def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
     """Günlük risk metriklerini GeoJSON'a ekler (ID normalize + zfill)."""
     if not geojson_dict or day_df.empty:
         return geojson_dict
 
     target_len = _detect_geojson_id_len(geojson_dict)
+
     # risk tarafını normalize et
     day_df = day_df.copy()
     day_df["geoid"] = (
@@ -249,15 +230,17 @@ def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
                 "risk_score_daily": float(row["risk_score_daily"]),
                 "risk_level": row["risk_level"],
             }
-        features_out.append({**feat, "properties": props})
+            features_out.append({**feat, "properties": props})
+        else:
+            features_out.append(feat)
 
     return {**geojson_dict, "features": features_out}
-
 
 def make_map(geojson_enriched: dict):
     if not geojson_enriched:
         st.info("Haritayı görmek için GeoJSON bulunamadı.")
         return
+
     # low=yeşil, medium=sarı, high=turuncu, critical=kırmızı
     color_expr = [
         "case",
@@ -267,6 +250,7 @@ def make_map(geojson_enriched: dict):
         ["==", ["get", "risk_level"], "critical"], [204, 0, 0],
         [200, 200, 200],
     ]
+
     layer = pdk.Layer(
         "GeoJsonLayer",
         geojson_enriched,
@@ -277,6 +261,7 @@ def make_map(geojson_enriched: dict):
         extruded=False,
         opacity=0.6,
     )
+
     deck = pdk.Deck(
         layers=[layer],
         initial_view_state=pdk.ViewState(latitude=37.7749, longitude=-122.4194, zoom=10),
@@ -289,7 +274,6 @@ def make_map(geojson_enriched: dict):
         },
     )
     st.pydeck_chart(deck, use_container_width=True)
-
 
 # ------------------------------------------------------------
 # UI — veri çekme ve akış
@@ -318,7 +302,10 @@ risk_daily = daily_average(risk_df)
 # Tarih seçimi
 dates = sorted(risk_daily["date"].unique())
 sel_date = st.sidebar.selectbox(
-    "Gün seçin", dates, index=len(dates) - 1 if dates else 0, format_func=lambda d: str(d)
+    "Gün seçin",
+    dates,
+    index=len(dates) - 1 if dates else 0,
+    format_func=lambda d: str(d)
 )
 
 # Günün sınıflandırması
@@ -336,12 +323,12 @@ geojson = fetch_geojson()
 
 st.subheader(f"Harita — {sel_date}")
 if not geojson:
-    st.warning("GeoJSON bulunamadı. Secrets'taki `geojson_owner/repo/path` değerlerini kontrol edin.")
+    st.warning("GeoJSON bulunamadı. Secrets'taki geojson_owner/repo/path değerlerini kontrol edin.")
 else:
     enriched = inject_properties(geojson, one_day)
     make_map(enriched)
 
-# Tablo + indirme
+# Tablo + indirme (ekrandaki DF'ten CSV üretimi — artifact ile ilgisi yok)
 st.subheader("Seçilen Gün Tablosu")
 st.dataframe(
     one_day.drop(columns=["q25", "q50", "q75"], errors="ignore").sort_values(
@@ -349,7 +336,6 @@ st.dataframe(
     ),
     use_container_width=True,
 )
-
 csv = one_day.drop(columns=["q25", "q50", "q75"], errors="ignore").to_csv(index=False).encode("utf-8")
 st.download_button(
     "Günlük tabloyu CSV indir",
@@ -364,4 +350,4 @@ with st.expander("Teşhis (GeoJSON)"):
         "geojson_repo": GEOJSON_REPO,
         "geojson_path": GEOJSON_PATH,
     })
-    st.caption("GeoJSON public değilse veya rate limit varsa, token (secrets) gereklidir.")
+st.caption("GeoJSON public değilse veya rate limit varsa, token (secrets) gereklidir.")
