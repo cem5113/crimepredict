@@ -18,6 +18,11 @@ import requests
 # ------------------------------------------------------------
 OWNER = "cem5113"
 REPO = "crime_prediction_data"
+
+
+# GeoJSON farklı bir repoda olabilir (ör. cem5113/crimepredict)
+GEOJSON_OWNER = st.secrets.get("geojson_owner", OWNER)
+GEOJSON_REPO = st.secrets.get("geojson_repo", REPO)
 ARTIFACT_NAME = "sf-crime-parquet"
 EXPECTED_PARQUET = "risk_hourly.parquet"
 EXPECTED_CSV = "risk_hourly.csv"
@@ -86,4 +91,6 @@ raise FileNotFoundError(
 f"Zip içinde {EXPECTED_PARQUET} veya {EXPECTED_CSV} bulunamadı. İçerik: {memlist}")
 with zf.open(target) as f:
 if target.endswith(".parquet"):
-day_df['geoid'] = day_df['geoid'].astype(str).str.replace(r'\
+df = pd.read_parquet(f)
+else:
+df = pd.read_csv(f)
