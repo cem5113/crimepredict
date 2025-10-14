@@ -215,18 +215,18 @@ def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
     return {**geojson_dict, "features": features_out}
 
 
-def make_map(geojson_enriched: dict, initial_view=None):
+def make_map(geojson_enriched: dict):
     if not geojson_enriched:
-        st.info("Haritayı görmek için GeoJSON yükleyin.")
+        st.info("Haritayı görmek için GeoJSON bulunamadı.")
         return
 
-    # Renkler: low=yeşil, medium=sarı, high=turuncu, critical=kırmızı
+    # low=yeşil, medium=sarı, high=turuncu, critical=kırmızı
     color_expr = [
-        'case',
-        ['==', ['get', 'risk_level'], 'low'], [56, 168, 0],
-        ['==', ['get', 'risk_level'], 'medium'], [255, 221, 0],
-        ['==', ['get', 'risk_level'], 'high'], [255, 140, 0],
-        ['==', ['get', 'risk_level'], 'critical'], [204, 0, 0],
+        "case",
+        ["==", ["get", "properties.risk_level"], "low"], [56, 168, 0],
+        ["==", ["get", "properties.risk_level"], "medium"], [255, 221, 0],
+        ["==", ["get", "properties.risk_level"], "high"], [255, 140, 0],
+        ["==", ["get", "properties.risk_level"], "critical"], [204, 0, 0],
         [200, 200, 200],
     ]
 
@@ -237,28 +237,25 @@ def make_map(geojson_enriched: dict, initial_view=None):
         filled=True,
         get_fill_color=color_expr,
         pickable=True,
-        extruded=False,
         opacity=0.6,
     )
 
-    if initial_view is None:
-        initial_view = pdk.ViewState(latitude=37.7749, longitude=-122.4194, zoom=10)
-
     tooltip = {
-        "html": "<b>GEOID:</b> {GEOID}{geoid}<br/>"
-                "<b>Risk:</b> {risk_level}<br/>"
-                "<b>Skor:</b> {risk_score_daily}",
+        "html": (
+            "<b>ID:</b> {properties.display_id}<br/>"
+            "<b>Risk:</b> {properties.risk_level}<br/>"
+            "<b>Skor:</b> {properties.risk_score_txt}"
+        ),
         "style": {"backgroundColor": "#262730", "color": "white"},
     }
 
     deck = pdk.Deck(
         layers=[layer],
-        initial_view_state=initial_view,
+        initial_view_state=pdk.ViewState(latitude=37.7749, longitude=-122.4194, zoom=10),
         map_style="light",
         tooltip=tooltip,
     )
     st.pydeck_chart(deck, use_container_width=True)
-
 
 # ------------------------------------------------------------
 # UI
