@@ -12,6 +12,9 @@ from utils.constants import KEY_COL, RISK_COL, DATE_COL
 st.set_page_config(page_title="SF Crime Risk", layout="wide")
 st.title("🗺️ SF Crime Risk — Günlük Özet")
 
+# Hangi dosya koşturuluyor? (teşhis)
+st.caption(f"Running file: {__file__}")
+
 # 1) Veri
 try:
     raw = load_risk_df()
@@ -25,13 +28,13 @@ if raw is None or raw.empty:
 
 st.success(f"Yüklendi: {len(raw):,} satır")
 
-# 2) Günlük ortalama (aynı tarihteki skorların ortalaması)
+# 2) Günlük ortalama
 g = daily_mean(raw)
 if g is None or g.empty:
     st.warning("Günlük özet boş.")
     st.stop()
 
-# 3) GEOID → centroid ekle (geojson yoksa NaN döner; app çökmez)
+# 3) GEOID → centroid
 g = add_centroids(g)
 
 # 4) Gün seçimi
@@ -42,7 +45,7 @@ gday = g[g[DATE_COL] == sel_date].copy()
 
 st.write("Seçilen günde hücre sayısı:", len(gday))
 
-# 5) Harita (centroid varsa)
+# 5) Harita
 m = Map(location=[37.7749, -122.4194], zoom_start=12, control_scale=True)
 heat_src = (
     gday[["latitude", "longitude", RISK_COL]]
