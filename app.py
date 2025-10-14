@@ -1,4 +1,4 @@
-# >>> REPLACE ENTIRE FILE: crimepredict/app.py <<<
+# crimepredict/app.py
 from __future__ import annotations
 import streamlit as st
 import pandas as pd
@@ -6,13 +6,16 @@ from folium import Map
 from folium.plugins import HeatMap
 from streamlit_folium import st_folium
 
+# Teşhis: gerçekten bu dosya mı çalışıyor?
+st.caption(f"Running file: {__file__}")
+
+# ---- Bağımlılıklar (yalın) ----
 from core.data import load_risk_df, daily_mean
 from utils.geo import add_centroids
 from utils.constants import KEY_COL, RISK_COL, DATE_COL
 
 st.set_page_config(page_title="SF Crime Risk", layout="wide")
 st.title("🗺️ SF Crime Risk — Günlük Özet")
-st.caption(f"Running file: {__file__}")  # teşhis
 
 # 1) Veri
 try:
