@@ -161,6 +161,18 @@ def get_latest_kpis() -> dict:
     ])
     if df.empty:
         return {"rows": 0, "last_update": "—", "avg_risk": 0.0, "high_rate": 0.0, "member": member}
+    
+    # --- GEOID tip düzeltme ---
+    def _fix_geoid(s: pd.Series, width: int = 11) -> pd.Series:
+        return (
+            s.astype("string")
+             .str.replace(".0", "", regex=False)
+             .str.replace(r"\D", "", regex=True)
+             .str.zfill(width)
+        )
+    
+    if "geoid" in df.columns:
+        df["geoid"] = _fix_geoid(df["geoid"])
 
     # Zaman damgasını normalize et (saniye/ms)
     last_ts = "—"
@@ -199,6 +211,18 @@ def sample_for_map(limit: int = 50000) -> pd.DataFrame:
     df = load_parquet(member, columns=["geoid","lat","lon","timestamp","risk_score","risk_level","pred_expected"])
     if df.empty:
         return df
+    
+    # --- GEOID tip düzeltme ---
+    def _fix_geoid(s: pd.Series, width: int = 11) -> pd.Series:
+        return (
+            s.astype("string")
+             .str.replace(".0", "", regex=False)
+             .str.replace(r"\D", "", regex=True)
+             .str.zfill(width)
+        )
+    
+    if "geoid" in df.columns:
+        df["geoid"] = _fix_geoid(df["geoid"])
 
     # risk_score'u numerik'e çevir (downsample için)
     if "risk_score" in df.columns:
