@@ -1,18 +1,19 @@
-# config/settings.py
-from pathlib import Path
+from __future__ import annotations
 import os
+from pathlib import Path
 
-ARTIFACT_ZIP = Path(os.getenv("CRIME_ARTIFACT_ZIP", "sf-crime-parquet.zip"))
-DEFAULT_PARQUET_MEMBER = os.getenv("HOME_MAP_PARQUET", "sf_crime_09.parquet") 
+# ---- zorunlu/varsayılan yollar ----
+ROOT = Path(__file__).resolve().parents[1]
+DATA_DIR = Path(os.getenv("DATA_DIR", ROOT / "data"))
+RESULTS_DIR = Path(os.getenv("RESULTS_DIR", ROOT / "results"))
 
-DEFAULT_PARQUET_MEMBER = os.getenv("HOME_MAP_PARQUET", "risk_hourly.parquet")
+# parquet veya csv kaynak yolu (yerelde tutuyorsun)
+DEFAULT_PARQUET = os.getenv("DEFAULT_PARQUET", str(DATA_DIR / "risk_hourly.parquet"))
+DEFAULT_CSV = os.getenv("DEFAULT_CSV", str(DATA_DIR / "risk_hourly.csv"))
 
-MAP_VIEW = {
-    "lat": 37.7749,
-    "lon": -122.4194,
-    "zoom": 11,
-    "pitch": 35,
-    "bearing": 0,
-}
+# sf hücreleri geojson (GEOID → centroid eşleştirme için)
+SF_CELLS_GEOJSON = os.getenv("SF_CELLS_GEOJSON", str(ROOT / "core" / "data" / "sf_cells.geojson"))
 
-RISK_LEVEL_LABELS = {3: "Very High", 2: "High", 1: "Medium", 0: "Low"}
+# klasörleri oluştur
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
