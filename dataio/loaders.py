@@ -5,130 +5,64 @@ from __future__ import annotations
 import io
 import json
 import os
-import sys
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+import importlib
 
 # --- third-party ---
 import pandas as pd
 import requests
 
-# ===================== path & settings =====================
+# ===================== paths & settings (robust) =====================
 
 _THIS = Path(__file__).resolve()
-# repo-root/crimepredict/dataio/loaders.py → repo-root
-_REPO_ROOT = _THIS.parents[2]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+_PKG_ROOT = _THIS.parents[1]            # repo-root/crimepredict
+_REPO_ROOT = _PKG_ROOT.parent           # repo-root
 
-# settings modülünü nerede olursa olsun bul: (1) crimepredict/config, (2) kök/config, (3) defaults
-_S = None
-try:
-    import crimepredict.config.settings as _S  # type: ignore
-except Exception:
+# settings modülünü bul: (1) crimepredict.config.settings → (2) config.settings → (3) yoksa None
+_settings = None
+for mod in ("crimepredict.config.settings", "config.settings"):
     try:
-        import config.settings as _S  # type: ignore
+        _settings = importlib.import_module(mod)
+        break
     except Exception:
-        _S = None  # defaults'a düş
+        _settings = None
 
-# DATA_DIR / RESULTS_DIR settings'te yoksa defaults
-SETTINGS_DATA_DIR = getattr(_S, "DATA_DIR", "./data")
-SETTINGS_RESULTS_DIR = getattr(_S, "RESULTS_DIR", "./results")
+# ENV → settings → defaults
+DATA_DIR = Path(
+    os.getenv("CRIME_DATA_DIR")
+    or (getattr(_settings, "DATA_DIR", None) if _settings else None)
+    or (_REPO_ROOT / "data")
+).resolve()
 
-DATA_DIR = Path(SETTINGS_DATA_DIR)
-RESULTS_DIR = Path(SETTINGS_RESULTS_DIR)
+RESULTS_DIR = Path(
+    os.getenv("CRIME_RESULTS_DIR")
+    or (getattr(_settings, "RESULTS_DIR", None) if _settings else None)
+    or (_REPO_ROOT / "results")
+).resolve()
+
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-# ===================== env =====================
+# ===================== env & constants =====================
 
-GITHUB_REPO = os.getenv("GITHUB_REPO", "cem5113/crime_prediction_data")
-GITHUB_WORKFLOW = os.getenv("GITHUB_WORKFLOW", "full_pipeline.yml")
+GITHUB_REPO          = os.getenv("GITHUB_REPO", "cem5113/crime_prediction_data")
 GITHUB_ARTIFACT_NAME = os.getenv("GITHUB_ARTIFACT_NAME", "sutam-results")
-GH_TOKEN = os.getenv("GH_TOKEN", "")
+GH_TOKEN             = os.getenv("GH_TOKEN", "")
 
 CRIME_CSV_URL = os.getenv(
     "CRIME_CSV_URL",
     "https://github.com/cem5113/crime_prediction_data/releases/latest/download/sf_crime.csv",
 )
 
-# SF için 11 haneli GEOID kullanımı
 GEOID_LEN = int(os.getenv("GEOID_LEN", "11"))
-
-# ===================== schema =====================
 
 REQUIRED_COLS: List[str] = ["GEOID", "date", "event_hour"]
 
 # ===================== helpers =====================
-# loaders.py içine ekle (helpers bölümünün altı uygun)
-def _attach_geo_centroids(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    GEOID tabanlı centroid lat/lon'u ekler.
-    Öncelik:
-      - Varsa mevcut 'lat'/'lon' korunur (numeric'e coerced edilir)
-      - Yoksa sf_cells.geojson içindeki centroid'lerden doldurulur
-      - Yine yoksa boş (NaN) Series oluşturulur (downstream .fillna güvenle çalışır)
-    """
-    out = df.copy()
-
-    # lat/lon kolonlarını numeric yap (varsa)
-    if "lat" in out.columns:
-        out["lat"] = pd.to_numeric(out["lat"], errors="coerce")
-    if "lon" in out.columns:
-        out["lon"] = pd.to_numeric(out["lon"], errors="coerce")
-
-    # GEOJSON yolu: crimepredict/data/sf_cells.geojson
-    geojson_path = Path(__file__).resolve().parents[1] / "data" / "sf_cells.geojson"
-    if geojson_path.exists():
-        try:
-            raw = json.loads(geojson_path.read_text(encoding="utf-8"))
-            feats = raw.get("features", [])
-            if feats:
-                # properties.geoid, properties.centroid_lat/lon'ı al
-                rows = []
-                for f in feats:
-                    props = f.get("properties", {})
-                    geoid = str(props.get("geoid", "")).strip()
-                    clat = props.get("centroid_lat", None)
-                    clon = props.get("centroid_lon", None)
-                    if geoid:
-                        rows.append((geoid, clat, clon))
-                if rows:
-                    gdf = pd.DataFrame(rows, columns=["GEOID", "centroid_lat", "centroid_lon"])
-                    # GEOID normalize (11 hane)
-                    gdf["GEOID"] = gdf["GEOID"].astype(str).str.extract(r"(\d+)", expand=False).str[:GEOID_LEN].str.zfill(GEOID_LEN)
-                    # join
-                    out["GEOID"] = out["GEOID"].astype(str).str.extract(r"(\d+)", expand=False).str[:GEOID_LEN].str.zfill(GEOID_LEN)
-                    out = out.merge(gdf, on="GEOID", how="left")
-
-                    # lat/lon yoksa centroid'ten doldur
-                    if "lat" not in out.columns:
-                        out["lat"] = pd.to_numeric(out["centroid_lat"], errors="coerce")
-                    else:
-                        out["lat"] = out["lat"].fillna(pd.to_numeric(out["centroid_lat"], errors="coerce"))
-
-                    if "lon" not in out.columns:
-                        out["lon"] = pd.to_numeric(out["centroid_lon"], errors="coerce")
-                    else:
-                        out["lon"] = out["lon"].fillna(pd.to_numeric(out["centroid_lon"], errors="coerce"))
-        except Exception as e:
-            # Sessiz geç; downstream guard'lar devam eder
-            print("sf_cells.geojson okunamadı:", e)
-
-    # Eğer hâlâ yoksa boş Series oluştur (float dtype)
-    if "lat" not in out.columns:
-        out["lat"] = pd.Series([pd.NA] * len(out), index=out.index, dtype="float")
-    if "lon" not in out.columns:
-        out["lon"] = pd.Series([pd.NA] * len(out), index=out.index, dtype="float")
-
-    return out
-
 
 def _headers(require_auth: bool = False) -> Optional[Dict[str, str]]:
-    """
-    GitHub API headerları. require_auth=True ve GH_TOKEN yoksa None döner.
-    """
     base = {"Accept": "application/vnd.github+json"}
     if GH_TOKEN:
         base["Authorization"] = f"Bearer {GH_TOKEN}"
@@ -136,24 +70,18 @@ def _headers(require_auth: bool = False) -> Optional[Dict[str, str]]:
         return None
     return base
 
-
 def _read_anyframe_from_bytes(blob: bytes) -> pd.DataFrame:
-    """
-    Bytes içeriğini CSV -> Parquet sırası ile okumayı dener; olmazsa diske yazıp tekrar dener.
-    """
-    # İlk deneme: CSV
+    # 1) CSV dene
     try:
         return pd.read_csv(io.BytesIO(blob), low_memory=False)
     except Exception:
         pass
-
-    # İkinci deneme: Parquet
+    # 2) Parquet dene
     try:
         return pd.read_parquet(io.BytesIO(blob))  # type: ignore
     except Exception:
         pass
-
-    # Son çare: diske yazıp uzantısına bakmadan tekrar dene
+    # 3) Disk üstünden son çare
     tmp = DATA_DIR / "_artifact_tmp_blob"
     tmp.write_bytes(blob)
     try:
@@ -167,12 +95,11 @@ def _read_anyframe_from_bytes(blob: bytes) -> pd.DataFrame:
         except Exception:
             pass
 
-
 def _artifact_bytes(picks: List[str], artifact_name: Optional[str] = None) -> Optional[bytes]:
     """
-    GitHub Actions artifactlarından ilk eşleşen dosyayı bytes olarak döndürür.
-    GH_TOKEN yoksa None döner (sessiz atla).
-    'picks' içinde verilen dosya adlarının tam eşleşmesi ya da sonda eşleşmesi kabul edilir.
+    GitHub Actions artifact’larından ilk eşleşeni bytes döndürür.
+    GH_TOKEN yoksa None döner.
+    'picks' içindeki dosya isimlerini tam ya da sonda eşleşerek arar.
     """
     headers = _headers(require_auth=True)
     if headers is None:
@@ -183,14 +110,13 @@ def _artifact_bytes(picks: List[str], artifact_name: Optional[str] = None) -> Op
 
     try:
         runs = requests.get(runs_url, headers=headers, timeout=30).json()
+        run_ids = [
+            r["id"]
+            for r in runs.get("workflow_runs", [])
+            if r.get("conclusion") == "success"
+        ]
     except Exception:
         return None
-
-    run_ids = [
-        r["id"]
-        for r in runs.get("workflow_runs", [])
-        if r.get("conclusion") == "success"
-    ]
 
     for rid in run_ids:
         try:
@@ -199,7 +125,6 @@ def _artifact_bytes(picks: List[str], artifact_name: Optional[str] = None) -> Op
         except Exception:
             continue
 
-        # Önce ismi tam eşleşen artifact, sonra diğer geçerli artifactlar
         ordered = (
             [a for a in arts if a.get("name") == artifact_name and not a.get("expired", False)]
             or [a for a in arts if not a.get("expired", False)]
@@ -211,7 +136,7 @@ def _artifact_bytes(picks: List[str], artifact_name: Optional[str] = None) -> Op
                 zf = zipfile.ZipFile(io.BytesIO(z_content))
                 names = zf.namelist()
 
-                # Doğrudan verilen yollar
+                # Doğrudan aday yollar
                 for p in picks:
                     for cand in (p, f"results/{p}", f"out/{p}", f"crime_prediction_data/{p}"):
                         if cand in names:
@@ -225,47 +150,48 @@ def _artifact_bytes(picks: List[str], artifact_name: Optional[str] = None) -> Op
                 continue
     return None
 
-
 def _normalize_geoid(s: pd.Series, L: int = GEOID_LEN) -> pd.Series:
     return s.astype(str).str.extract(r"(\d+)", expand=False).str[:L].str.zfill(L)
 
+def _to_naive_datetime(s: pd.Series) -> pd.Series:
+    """Seri’yi datetime’a çevirir; tz varsa tz’siz (naive) yapar."""
+    dt = pd.to_datetime(s, errors="coerce", utc=False)
+    # tz-aware ise tz_convert(None) çalışır; değilse dokunma
+    try:
+        if getattr(dt.dt, "tz", None) is not None:
+            dt = dt.dt.tz_convert(None)
+    except Exception:
+        # Bazı durumlarda tz_localize(None) gerekebilir
+        try:
+            dt = pd.to_datetime(s, errors="coerce", utc=True).dt.tz_convert(None)
+        except Exception:
+            pass
+    return dt
 
 def _ensure_time_cols(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    date/datetime -> pandas datetime; UTC ise naive'a çevir (tz bilgisi kaldırılır).
-    event_hour yoksa saat çıkarılır.
-    """
     out = df.copy()
-
-    # date/datetime normalize
     if "date" in out.columns:
-        out["date"] = pd.to_datetime(out["date"], errors="coerce", utc=True).dt.tz_convert(None)
+        out["date"] = _to_naive_datetime(out["date"])
     elif "datetime" in out.columns:
-        out["date"] = pd.to_datetime(out["datetime"], errors="coerce", utc=True).dt.tz_convert(None)
+        out["date"] = _to_naive_datetime(out["datetime"])
     else:
         out["date"] = pd.NaT
 
-    # event_hour
     if "event_hour" not in out.columns:
         hours = pd.to_datetime(out["date"], errors="coerce").dt.hour
-        out["event_hour"] = hours.where(hours.notna(), None).fillna(0).astype(int)
-
+        out["event_hour"] = hours.fillna(0).astype(int)
     return out
-
 
 def _ensure_latlon(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Mevcut kolonlardan lat/lon türetir (lat/latitude/y/lat_dd, lon/longitude/x/lng/long/lon_dd).
-    """
     out = df.copy()
-    cand_lat = [c for c in out.columns if c.lower() in ["lat", "latitude", "y", "lat_dd"]]
-    cand_lon = [c for c in out.columns if c.lower() in ["lon", "longitude", "x", "lng", "long", "lon_dd"]]
-    if cand_lat and "lat" not in out.columns:
-        out["lat"] = pd.to_numeric(out[cand_lat[0]], errors="coerce")
-    if cand_lon and "lon" not in out.columns:
-        out["lon"] = pd.to_numeric(out[cand_lon[0]], errors="coerce")
+    # En yaygın isimlerden türet
+    lat_cands = [c for c in out.columns if c.lower() in ["lat", "latitude", "y", "lat_dd"]]
+    lon_cands = [c for c in out.columns if c.lower() in ["lon", "longitude", "x", "lng", "long", "lon_dd"]]
+    if lat_cands and "lat" not in out.columns:
+        out["lat"] = pd.to_numeric(out[lat_cands[0]], errors="coerce")
+    if lon_cands and "lon" not in out.columns:
+        out["lon"] = pd.to_numeric(out[lon_cands[0]], errors="coerce")
     return out
-
 
 def _parse_and_cleanup(df: pd.DataFrame) -> pd.DataFrame:
     df = _ensure_latlon(_ensure_time_cols(df))
@@ -276,11 +202,9 @@ def _parse_and_cleanup(df: pd.DataFrame) -> pd.DataFrame:
             df["GEOID"] = df["GEOID"].astype(str)
     return df
 
-
 def _validate_schema(df: pd.DataFrame) -> Tuple[bool, List[str]]:
     missing = [c for c in REQUIRED_COLS if c not in df.columns]
     return len(missing) == 0, missing
-
 
 def _cache_latest(df: pd.DataFrame) -> None:
     try:
@@ -288,9 +212,7 @@ def _cache_latest(df: pd.DataFrame) -> None:
     except Exception:
         pass
 
-
 # ===================== metadata =====================
-
 
 def load_metadata() -> Dict[str, Any]:
     """
@@ -314,7 +236,6 @@ def load_metadata() -> Dict[str, Any]:
         pass
     return {}
 
-
 def load_metadata_or_default() -> Dict[str, Any]:
     m = load_metadata()
     if m:
@@ -330,21 +251,18 @@ def load_metadata_or_default() -> Dict[str, Any]:
         "has_latlon": False,
     }
 
-
 # ===================== public API =====================
-
 
 def load_sf_crime_latest() -> Tuple[pd.DataFrame, str]:
     """
     Kaynak sırası:
-      1) GitHub Actions artifact (ENV: GITHUB_ARTIFACT_NAME)
-      2) Release (latest): sf_crime.csv (ENV: CRIME_CSV_URL)
+      1) GitHub Actions artifact (GH_TOKEN gerekli)
+      2) Release (latest): sf_crime.csv (CRIME_CSV_URL)
       3) RESULTS_DIR: sf_crime_latest.parquet|csv
-      4) Yerel cache (data/)
-      5) Boş DataFrame
+      4) DATA_DIR lokal cache
+      5) boş DataFrame
 
-    Dönüş: (df, src_tag)
-      src_tag ∈ {"artifact","release","results","local:<ad>","empty"}
+    Dönüş: (df, src_tag)  → src_tag ∈ {"artifact","release","results","local:<ad>","empty"}
     """
     # --- 1) Artifact ---
     try:
@@ -392,16 +310,9 @@ def load_sf_crime_latest() -> Tuple[pd.DataFrame, str]:
                 return df, tag
             except Exception as e:
                 print("RESULTS okumada hata:", e)
-                continue
 
-    # --- 4) Yerel DATA_DIR cache ---
-    for name in [
-        "sf_crime_latest.csv",
-        "sf_crime_artifact_cache.csv",
-        "sf_crime_09.csv",
-        "metrics_all.csv",
-        "sf_crime.csv",
-    ]:
+    # --- 4) DATA_DIR cache ---
+    for name in ["sf_crime_latest.csv", "sf_crime_artifact_cache.csv", "sf_crime_09.csv", "metrics_all.csv", "sf_crime.csv"]:
         p = DATA_DIR / name
         if p.exists():
             try:
@@ -413,11 +324,8 @@ def load_sf_crime_latest() -> Tuple[pd.DataFrame, str]:
                 continue
 
     # --- 5) boş ---
-    df = pd.DataFrame(
-        {"GEOID": [], "date": [], "event_hour": [], "crime_count": [], "lat": [], "lon": []}
-    )
+    df = pd.DataFrame({"GEOID": [], "date": [], "event_hour": [], "crime_count": [], "lat": [], "lon": []})
     return df, "empty"
-
 
 __all__ = [
     "load_sf_crime_latest",
