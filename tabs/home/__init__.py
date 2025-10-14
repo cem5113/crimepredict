@@ -1,3 +1,5 @@
+# tabs/home/__init__.py
+from __future__ import annotations
 import pandas as pd
 import streamlit as st
 from core.data import load_parquet
@@ -30,17 +32,16 @@ def render(state=None, services=None):
         st.warning("⚠️ Harita için uygun veri bulunamadı.")
         return
 
+    # GEOID fix
     df["geoid"] = _clean_geoid(df["geoid"])
     df = df.dropna(subset=["geoid", "risk_score", "date"])
 
+    # Aynı date içindeki risk skorlarının ortalaması (saat filtresine gerek yok denmişti)
     latest_date = df["date"].max()
     df = df[df["date"] == latest_date]
+    df = df.groupby("geoid", as_index=False)["risk_score"].mean()
 
-    df = (
-        df.groupby("geoid", as_index=False)["risk_score"]
-          .mean()
-          .rename(columns={"risk_score": "risk_score"})
-    )
+    # Görselleştirme için seviye
     df["risk_level"] = _level_from_score(df["risk_score"]).astype("int64")
 
     try:
@@ -52,8 +53,8 @@ def register():
     return {
         "key": TAB_KEY,
         "title": "Ana Sayfa",
-        "icon": "🏠",
         "label": "🏠 Ana Sayfa",
+        "icon": "🏠",
         "order": 0,
         "render": render,
     }
