@@ -1,25 +1,43 @@
 # app.py
 from __future__ import annotations
 
+# --- SAFE IMPORT SHIM (kritik) ---
+import sys, importlib.util
+from pathlib import Path
+
+_THIS = Path(__file__).resolve()
+_REPO_ROOT = _THIS.parents[1]  # repo kökü
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+try:
+    from crimepredict.dataio.loaders import (
+        load_sf_crime_latest,
+        load_metadata_or_default,
+        _validate_schema,
+    )
+except ModuleNotFoundError:
+    _cand = _THIS.parent / "dataio" / "loaders.py"
+    if not _cand.exists():
+        _cand = _REPO_ROOT / "crimepredict" / "dataio" / "loaders.py"
+    spec = importlib.util.spec_from_file_location("crimepredict.dataio.loaders", _cand)
+    mod = importlib.util.module_from_spec(spec)  # type: ignore
+    assert spec and spec.loader, "loaders.py bulunamadı veya yüklenemedi."
+    spec.loader.exec_module(mod)  # type: ignore
+    load_sf_crime_latest = mod.load_sf_crime_latest
+    load_metadata_or_default = mod.load_metadata_or_default
+    _validate_schema = mod._validate_schema
+# --- SAFE IMPORT SHIM SONU ---
+
 import inspect
-import sys
 import importlib
 import importlib.util
-from pathlib import Path
 from typing import Any, Dict, List
-
 import pandas as pd
 import streamlit as st
 
-# --- Ortam/Artifact ayarı (projene özgü) ---
+# --- Ortam/Artifact ayarı ---
 from core.data_boot import configure_artifact_env
-
-# --- Veri yükleyici (loader) ve metadata ---
-from crimepredict.dataio.loaders import (
-    load_sf_crime_latest,
-    load_metadata_or_default,
-    _validate_schema,
-)
 
 # Streamlit config EN ÜSTE olmalı
 configure_artifact_env()
