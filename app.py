@@ -45,6 +45,44 @@ st.set_page_config(page_title="Suç Tahmini", page_icon="🔎", layout="wide")
 
 
 # ========================= yardımcılar =========================
+# === DEBUG & FIX HELPERS ===
+import pandas as pd
+import streamlit as st
+
+def debug_geoid(df: pd.DataFrame, geoid_col="GEOID", sample=5) -> dict:
+    out = {"geoid_present": geoid_col in df.columns}
+    if not out["geoid_present"]:
+        return out
+    s = df[geoid_col]
+    out["geoid_dtype"] = str(s.dtype)
+    bad_float_mask = s.apply(lambda x: isinstance(x, float))
+    out["geoid_float_count"] = int(bad_float_mask.sum())
+    out["geoid_float_samples"] = s[bad_float_mask].head(sample).tolist()
+    try:
+        str_s = s.astype(str)
+        dot_mask = str_s.str.contains(r"\.0$", regex=True)
+        out["geoid_str_dotzero_count"] = int(dot_mask.sum())
+        out["geoid_str_dotzero_samples"] = str_s[dot_mask].head(sample).tolist()
+    except Exception as e:
+        out["geoid_str_check_error"] = repr(e)
+    return out
+
+def coerce_geoid(df: pd.DataFrame, col="GEOID") -> pd.DataFrame:
+    if col not in df.columns:
+        return df
+    s = (df[col].astype(str)
+                .str.strip()
+                .str.replace(r"\.0$", "", regex=True)  # sondaki .0'ı at
+                .str.replace(".", "", regex=False))    # varsa nokta temizle
+    df[col] = s
+    return df
+
+def series_or_default_debug(df: pd.DataFrame, cols, default=0.0, label="pred_expected") -> pd.Series:
+    for c in cols:
+        if c in df.columns:
+            return pd.to_numeric(df[c], errors="coerce")
+    # hiçbir kolon yoksa index uzunluğunda default seri döndür
+    return pd.Series(default, index=df.index, dtype="float64")
 
 def _discover_tabs() -> List[Dict[str, Any]]:
     """
@@ -140,68 +178,95 @@ def _safe_render(render_fn, services: Dict[str, Any] | None = None):
         # Her ihtimale karşı basit çağrı
         return render_fn()
 
-
-# ========================= ana uygulama =========================
-
-def main():
-    tabs = _discover_tabs()
-    if not tabs:
-        st.error("Sekme bulunamadı. `tabs/<name>/__init__.py` içinde register() tanımlayın.")
-        st.stop()
-
-    # --- VERİ & METADATA ---
-    with st.spinner("Veri yükleniyor..."):
-        df, src_tag = load_sf_crime_latest()
-        meta = load_metadata_or_default()
-        ok, missing = _validate_schema(df)
-
-    # services nesnesi: sekmelere dağıtılacak ortak kaynaklar
-    services: Dict[str, Any] = {
-        "data": df,               # ana DataFrame
-        "source": src_tag,        # verinin geldiği katman (artifact/release/...)
-        "meta": meta,             # üretim zamanı, kolonlar, vs.
-        "schema_ok": ok,
-        "schema_missing": missing,
-    }
-
-    # Aktif sekme
-    active_key = st.session_state.get("__active_tab__", tabs[0]["key"])
-
-    # Sidebar menü
-    with st.sidebar:
-        st.header("Menü")
-        labels = [f"{t.get('icon', '🗂️')} {t.get('title', t.get('label', 'Sekme'))}" for t in tabs]
-        keys = [t["key"] for t in tabs]
-        idx = keys.index(active_key) if active_key in keys else 0
-        choice = st.radio("Sekbe", labels, index=idx, label_visibility="collapsed")
-        active_key = keys[labels.index(choice)]
-        st.session_state["__active_tab__"] = active_key
-
-        # ---- veri durumu
-        st.divider()
-        st.caption("**Veri Durumu**")
-        st.write(f"Kaynak: `{services['source']}`")
-        try:
-            st.write(f"Satır: {len(services['data']):,}")
-        except Exception:
-            st.write("Satır: -")
-        gen_at = services["meta"].get("generated_at")
-        if gen_at:
-            st.write(f"Üretim: {gen_at}")
+    # ========================= ana uygulama =========================
+    
+    def main():
+        tabs = _discover_tabs()
+        if not tabs:
+            st.error("Sekme bulunamadı. `tabs/<name>/__init__.py` içinde register() tanımlayın.")
+            st.stop()
+    
+        # --- VERİ & METADATA (tek sefer) ---
+        with st.spinner("Veri yükleniyor..."):
+            df, src_tag = load_sf_crime_latest()
+            meta = load_metadata_or_default()
+            ok, missing = _validate_schema(df)
+    
+        # ==== DIAGNOSTIC & FIXES ====
+        with st.expander("🧪 Veri Teşhisi / GEOID & kolon kontrolleri", expanded=False):
+            rep = debug_geoid(df, "GEOID")
+            st.write("GEOID raporu:", rep)
+    
+            if rep.get("geoid_present", False):
+                if rep.get("geoid_float_count", 0) > 0 or rep.get("geoid_str_dotzero_count", 0) > 0:
+                    st.warning("GEOID’de float veya '.0' uçlu değerler tespit edildi → string’e çevrilecek.")
+                df = coerce_geoid(df, "GEOID")
+                st.caption("GEOID string’e dönüştürüldü.")
+    
+            # pred_expected/expected/risk_score → güvenli seri (float üstünde .fillna hatasını engeller)
+            cand_cols = ["pred_expected", "expected", "risk_score"]
+            have = [c for c in cand_cols if c in df.columns]
+            st.write("Risk kolon adayları (mevcut):", have if have else "Yok")
+            df["pred_expected"] = series_or_default_debug(
+                df, cand_cols, default=0.0, label="pred_expected"
+            ).fillna(0.0)
+    
+            # pydeck öncesi numerik/NaN temizlik
+            for c in ["latitude", "longitude", "pred_expected"]:
+                if c in df.columns:
+                    df[c] = pd.to_numeric(df[c], errors="coerce")
+    
+            if {"latitude","longitude"} <= set(df.columns):
+                miss = df[["latitude","longitude"]].isna().sum().to_dict()
+                st.write("Lat/Lon NaN sayıları:", miss)
+        # ==== DIAGNOSTIC & FIXES SONU ====
+    
+        # services nesnesi: sekmelere dağıtılacak ortak kaynaklar
+        services: Dict[str, Any] = {
+            "data": df,               # ana DataFrame (düzeltilmiş)
+            "source": src_tag,        # verinin geldiği katman (artifact/release/...)
+            "meta": meta,             # üretim zamanı, kolonlar, vs.
+            "schema_ok": ok,
+            "schema_missing": missing,
+        }
+    
+        # Aktif sekme
+        active_key = st.session_state.get("__active_tab__", tabs[0]["key"])
+    
+        # Sidebar menü
+        with st.sidebar:
+            st.header("Menü")
+            labels = [f"{t.get('icon', '🗂️')} {t.get('title', t.get('label', 'Sekme'))}" for t in tabs]
+            keys = [t["key"] for t in tabs]
+            idx = keys.index(active_key) if active_key in keys else 0
+            choice = st.radio("Sekme", labels, index=idx, label_visibility="collapsed")
+            active_key = keys[labels.index(choice)]
+            st.session_state["__active_tab__"] = active_key
+    
+            # ---- veri durumu
+            st.divider()
+            st.caption("**Veri Durumu**")
+            st.write(f"Kaynak: `{services['source']}`")
+            try:
+                st.write(f"Satır: {len(services['data']):,}")
+            except Exception:
+                st.write("Satır: -")
+            gen_at = services["meta"].get("generated_at")
+            if gen_at:
+                st.write(f"Üretim: {gen_at}")
+            if not services["schema_ok"]:
+                st.warning(f"Beklenen şema eksik: {services['schema_missing']}")
+    
+        # Boş/eksik veri için ana ekranda da uyarı
         if not services["schema_ok"]:
-            st.warning(f"Beklenen şema eksik: {services['schema_missing']}")
-
-    # Boş/eksik veri için ana ekranda da uyarı
-    if not services["schema_ok"]:
-        st.info(
-            "Minimum şema `['GEOID','date','event_hour']` olmalı. "
-            "Eksikler nedeniyle bazı sekmeler sınırlı çalışabilir."
-        )
-
-    # Seçili sekmeyi çalıştır
-    current = next(t for t in tabs if t["key"] == active_key)
-    _safe_render(current["render"], services=services)
-
+            st.info(
+                "Minimum şema `['GEOID','date','event_hour']` olmalı. "
+                "Eksikler nedeniyle bazı sekmeler sınırlı çalışabilir."
+            )
+    
+        # Seçili sekmeyi çalıştır
+        current = next(t for t in tabs if t["key"] == active_key)
+        _safe_render(current["render"], services=services)
 
 if __name__ == "__main__":
     main()
