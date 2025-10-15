@@ -177,11 +177,9 @@ def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
         "critical": [204, 0, 0],
     }
 
-# ... mevcut if/elif ile lvl'i bulduktan hemen sonra:
-props["risk_level"] = lvl
-props["fill_color"] = COLOR_MAP.get(lvl, [220, 220, 220])  # default
-
-    def _digits(s): return "".join(ch for ch in str(s) if ch.isdigit())
+    # ... mevcut if/elif ile lvl'i bulduktan hemen sonra:
+    props["risk_level"] = lvl
+    props["fill_color"] = COLOR_MAP.get(lvl, [220, 220, 220])  # default
 
     for feat in feats:
         props = (feat.get("properties") or {}).copy()
@@ -214,7 +212,6 @@ props["fill_color"] = COLOR_MAP.get(lvl, [220, 220, 220])  # default
                 lvl = "high"
             else:
                 lvl = "critical"
-            props["risk_level"] = lvl
             enriched += 1
 
         out.append({**feat, "properties": props})
