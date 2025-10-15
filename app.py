@@ -47,6 +47,14 @@ def _gh_headers():
         hdrs["Authorization"] = f"Bearer {GITHUB_TOKEN}"
     return hdrs
 
+def _digits(s: str) -> str:
+    return "".join(ch for ch in str(s) if ch.isdigit())
+
+def _mode_len(seq: list[str]) -> int:
+    if not seq: return 0
+    from collections import Counter
+    return Counter(len(x) for x in seq if x).most_common(1)[0][0]
+
 @st.cache_data(show_spinner=True, ttl=15 * 60)
 def fetch_latest_artifact_zip(owner: str, repo: str, artifact_name: str) -> bytes:
     if not GITHUB_TOKEN:
@@ -121,63 +129,98 @@ def _detect_geojson_id_len(gj: dict) -> int | None:
     return max(set(lens), key=lens.count) if lens else None
 
 def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
+    """
+    Risk DF (muhtemelen GEOID11) ile GeoJSON (GEOID12) arasındaki uzunluk farkını
+    otomatik çözer: her iki tarafı da sadece rakam + ortak uzunluğun ilk hanesine
+    (örn. 11) indirger ve eşleştirir. DF tarafında aynı anahtara birden fazla satır
+    düşerse ortalama alınır.
+    """
     if not geojson_dict or day_df.empty:
         return geojson_dict
 
-    target_len = _detect_geojson_id_len(geojson_dict) or 0
+    # --- DF tarafını normalize et
+    df = day_df.copy()
+    if "geoid" not in df.columns:
+        st.error("Risk verisinde 'geoid' kolonu yok."); 
+        return geojson_dict
+    df["geoid_digits"] = df["geoid"].astype(str).map(_digits)
 
-    # risk tarafını normalize et
-    day_df = day_df.copy()
-    day_df["geoid"] = (
-        day_df["geoid"]
-        .astype(str)
-        .str.replace(r"\D", "", regex=True)
-        .str.zfill(target_len if target_len > 0 else 0)
-    )
+    # --- GeoJSON tarafını normalize et & örnek ID'leri topla
+    gj_features = geojson_dict.get("features", [])
+    gj_id_raw = []
+    for feat in gj_features:
+        props = (feat.get("properties") or {})
+        # tercih sırası
+        if "geoid" in props: val = props["geoid"]
+        elif "GEOID" in props: val = props["GEOID"]
+        elif "cell_id" in props: val = props["cell_id"]
+        elif "id" in props: val = props["id"]
+        else:
+            # 'geoid' geçen başka bir property olabilir
+            cand = next((props[k] for k in props.keys() if "geoid" in str(k).lower()), None)
+            val = cand
+        gj_id_raw.append("" if val is None else str(val))
+    gj_digits = [_digits(x) for x in gj_id_raw]
 
-    # index'i de string yap
-    dmap = day_df.set_index("geoid")
-    dmap.index = dmap.index.astype(str)
+    # --- Ortak uzunluk: iki tarafın mod uzunluklarının min'i (ör. 11)
+    len_df = _mode_len(df["geoid_digits"].tolist())
+    len_gj = _mode_len(gj_digits)
+    common_len = min(len_df, len_gj)  # 11 ile 12'den 11'i seçer
 
-    enriched_count = 0
-    features_out = []
+    # --- eşleşme anahtarları: sadece rakam + ilk common_len hane
+    def _key_take(x: str) -> str:
+        d = _digits(x)
+        return d[:common_len] if common_len > 0 else d
 
-    for feat in geojson_dict.get("features", []):
+    df["match_key"] = df["geoid_digits"].map(lambda x: x[:common_len] if common_len>0 else x)
+
+    # aynı anahtara düşen birden fazla satır varsa (ör. bir tract'tan birden çok block-group),
+    # risk_score_daily'yi tekilleştir (ortalama)
+    df_key = (df.groupby("match_key", as_index=True)["risk_score_daily"].mean()
+                .to_frame().reset_index())
+
+    dmap = df_key.set_index("match_key")
+
+    # --- GeoJSON'u zenginleştir
+    enriched = 0
+    out = []
+    for feat, raw in zip(gj_features, gj_id_raw):
         props = (feat.get("properties") or {}).copy()
 
-        # GeoJSON tarafındaki kimlik; varsa hemen display_id'yi doldur (fallback)
-        disp = props.get("GEOID") or props.get("geoid") or props.get("cell_id") or props.get("id")
+        # tooltip için display_id
+        disp = (props.get("GEOID") or props.get("geoid") or 
+                props.get("cell_id") or props.get("id"))
         if disp is not None:
             props.setdefault("display_id", str(disp))
 
-        key_raw = None
-        for cand in ("geoid", "GEOID", "cell_id", "id"):
-            if cand in props:
-                key_raw = str(props[cand])
-                break
+        key = _key_take(raw)
+        if key and key in dmap.index:
+            val = float(dmap.loc[key, "risk_score_daily"])
+            # risk_level DF'de günlük çeyreklerle zaten var; yeniden etiketleyelim
+            # (çünkü df_key ortalama alınmış olabilir). Basit yeniden eşikleme:
+            # not: istersen mevcut q25/q50/q75 ile de hesaplayabiliriz.
+            props["risk_score_daily"] = val
+            props["risk_score_txt"] = f"{val:.4f}"
 
-        if key_raw:
-            key_norm = "".join(ch for ch in key_raw if ch.isdigit())
-            if target_len:
-                key_norm = key_norm.zfill(target_len)
+            # risk_level'i day_df'teki çeyreklere göre tekrar ayarla
+            q25 = float(day_df["risk_score_daily"].quantile(0.25))
+            q50 = float(day_df["risk_score_daily"].quantile(0.50))
+            q75 = float(day_df["risk_score_daily"].quantile(0.75))
+            if val <= q25: lvl = "low"
+            elif val <= q50: lvl = "medium"
+            elif val <= q75: lvl = "high"
+            else: lvl = "critical"
+            props["risk_level"] = lvl
 
-            # eşleşme varsa metrikleri enjekte et
-            if key_norm in dmap.index:
-                row = dmap.loc[key_norm]
-                if isinstance(row, pd.DataFrame):
-                    row = row.iloc[0]
-                props.update({
-                    "risk_score_daily": float(row["risk_score_daily"]),
-                    "risk_level": row["risk_level"],
-                    "risk_score_txt": f"{float(row['risk_score_daily']):.4f}",
-                })
-                enriched_count += 1
+            enriched += 1
 
-        features_out.append({**feat, "properties": props})
+        out.append({**feat, "properties": props})
 
-    # küçük teşhis çıktısı
-    st.caption(f"Enjekte edilen feature sayısı: {enriched_count} / {len(geojson_dict.get('features', []))}")
-    return {**geojson_dict, "features": features_out}
+    st.caption(
+        f"Eşleşme özeti → DF_len_mode: {len_df}, GJ_len_mode: {len_gj}, "
+        f"common_len: {common_len}, enjekte: {enriched}/{len(gj_features)}"
+    )
+    return {**geojson_dict, "features": out}
 
 # ---- GeoJSON akıllı yükleyici: local → artifact → raw ----
 @st.cache_data(show_spinner=True, ttl=60 * 60)
