@@ -296,7 +296,7 @@ def make_map(geojson_enriched: dict):
     )
 
     tooltip = {
-        "html": "<b>ID:</b> {display_id}<br/><b>Risk:</b> {risk_level}<br/><b>Skor:</b> {risk_score_txt}",
+        "html": "<b>GEOID:</b> {display_id}<br/><b>Risk:</b> {risk_level}<br/><b>Skor:</b> {risk_score_txt}",
         "style": {"backgroundColor": "#262730", "color": "white"},
     }
 
