@@ -168,6 +168,19 @@ def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
     q75 = float(df["risk_score_daily"].quantile(0.75))
     EPS = 1e-12
 
+    # renk paleti
+    COLOR_MAP = {
+        "zero":     [200, 200, 200],
+        "low":      [56, 168, 0],
+        "medium":   [255, 221, 0],
+        "high":     [255, 140, 0],
+        "critical": [204, 0, 0],
+    }
+
+# ... mevcut if/elif ile lvl'i bulduktan hemen sonra:
+props["risk_level"] = lvl
+props["fill_color"] = COLOR_MAP.get(lvl, [220, 220, 220])  # default
+
     def _digits(s): return "".join(ch for ch in str(s) if ch.isdigit())
 
     for feat in feats:
@@ -248,17 +261,6 @@ def make_map(geojson_enriched: dict):
         st.info("Haritayı görmek için GeoJSON bulunamadı.")
         return
 
-    # zero = gri; low = yeşil; medium = sarı; high = turuncu; critical = kırmızı
-    color_expr = [
-        "case",
-        ["==", ["get", "risk_level"], "zero"], [200, 200, 200],
-        ["==", ["get", "risk_level"], "low"], [56, 168, 0],
-        ["==", ["get", "risk_level"], "medium"], [255, 221, 0],
-        ["==", ["get", "risk_level"], "high"], [255, 140, 0],
-        ["==", ["get", "risk_level"], "critical"], [204, 0, 0],
-        [220, 220, 220],  # varsayılan
-    ]
-
     layer = pdk.Layer(
         "GeoJsonLayer",
         geojson_enriched,
@@ -266,7 +268,7 @@ def make_map(geojson_enriched: dict):
         get_line_color=[80, 80, 80],
         line_width_min_pixels=0.5,
         filled=True,
-        get_fill_color=color_expr,
+        get_fill_color="properties.fill_color",   # <<< BURASI ÖNEMLİ
         pickable=True,
         opacity=0.65,
     )
