@@ -305,6 +305,7 @@ def make_map(geojson_enriched: dict):
         initial_view_state=pdk.ViewState(latitude=37.7749, longitude=-122.4194, zoom=10),
         map_style="light",
         tooltip=tooltip,
+        height=800, 
     )
     st.pydeck_chart(deck, use_container_width=True)
 
