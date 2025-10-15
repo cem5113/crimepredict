@@ -294,32 +294,6 @@ def make_map(geojson_enriched: dict):
       <div><span style="display:inline-block;width:14px;height:14px;background:rgb(204,0,0);border:1px solid #666;"></span> critical</div>
     </div>
     """, unsafe_allow_html=True)
-(geojson_enriched: dict):
-    if not geojson_enriched:
-        st.info("Haritayı görmek için GeoJSON bulunamadı."); return
-    color_expr = [
-        "case",
-        ["==", ["get", "risk_level"], "low"], [56, 168, 0],
-        ["==", ["get", "risk_level"], "medium"], [255, 221, 0],
-        ["==", ["get", "risk_level"], "high"], [255, 140, 0],
-        ["==", ["get", "risk_level"], "critical"], [204, 0, 0],
-        [200, 200, 200],
-    ]
-    layer = pdk.Layer(
-        "GeoJsonLayer", geojson_enriched, stroked=False, filled=True,
-        get_fill_color=color_expr, pickable=True, opacity=0.6,
-    )
-    tooltip = {
-        "html": "<b>ID:</b> {display_id}<br/><b>Risk:</b> {risk_level}<br/><b>Skor:</b> {risk_score_txt}",
-        "style": {"backgroundColor": "#262730", "color": "white"},
-    }
-    deck = pdk.Deck(
-        layers=[layer],
-        initial_view_state=pdk.ViewState(latitude=37.7749, longitude=-122.4194, zoom=10),
-        map_style="light",
-        tooltip=tooltip,
-    )
-    st.pydeck_chart(deck, use_container_width=True)
 
 # =========================
 # UI Akışı
