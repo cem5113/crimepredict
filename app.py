@@ -150,7 +150,6 @@ def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
     if not geojson_dict or day_df.empty:
         return geojson_dict
 
-    # --- DF tarafını tract (11 hane) anahtarına indir
     df = day_df.copy()
     df["geoid_digits"] = df["geoid"].astype(str).str.replace(r"\D", "", regex=True).str.zfill(11)
     df_key = (
@@ -160,33 +159,29 @@ def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
     )
     dmap = df_key.set_index("match_key")
 
-    # --- GeoJSON ID’lerini topla ve 11 haneye indir (ilk 11 hane)
     feats = geojson_dict.get("features", [])
     enriched = 0
     out = []
 
-    # çeyrekler (renk etiketi için)
     q25 = float(df["risk_score_daily"].quantile(0.25))
     q50 = float(df["risk_score_daily"].quantile(0.50))
     q75 = float(df["risk_score_daily"].quantile(0.75))
+    EPS = 1e-12
 
     def _digits(s): return "".join(ch for ch in str(s) if ch.isdigit())
 
     for feat in feats:
         props = (feat.get("properties") or {}).copy()
 
-        # GeoJSON kimliği (geoid/GEOID/id/cell_id…)
         raw = None
         for k in ("geoid", "GEOID", "cell_id", "id"):
             if k in props:
                 raw = props[k]; break
         if raw is None:
-            # 'geoid' içeren başka bir alan adı olabilir
             for k, v in props.items():
                 if "geoid" in str(k).lower():
                     raw = v; break
 
-        # tooltip için display_id
         disp = raw if raw is not None else ""
         props.setdefault("display_id", str(disp))
 
@@ -195,7 +190,18 @@ def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
             val = float(dmap.loc[key, "risk_score_daily"])
             props["risk_score_daily"] = val
             props["risk_score_txt"] = f"{val:.4f}"
-            props["risk_level"] = "low" if val <= q25 else ("medium" if val <= q50 else ("high" if val <= q75 else "critical"))
+
+            if abs(val) <= EPS:
+                lvl = "zero"
+            elif val <= q25:
+                lvl = "low"
+            elif val <= q50:
+                lvl = "medium"
+            elif val <= q75:
+                lvl = "high"
+            else:
+                lvl = "critical"
+            props["risk_level"] = lvl
             enriched += 1
 
         out.append({**feat, "properties": props})
@@ -238,6 +244,57 @@ def fetch_geojson_smart(path_local: str,
     return {}
 
 def make_map(geojson_enriched: dict):
+    if not geojson_enriched:
+        st.info("Haritayı görmek için GeoJSON bulunamadı.")
+        return
+
+    # zero = gri; low = yeşil; medium = sarı; high = turuncu; critical = kırmızı
+    color_expr = [
+        "case",
+        ["==", ["get", "risk_level"], "zero"], [200, 200, 200],
+        ["==", ["get", "risk_level"], "low"], [56, 168, 0],
+        ["==", ["get", "risk_level"], "medium"], [255, 221, 0],
+        ["==", ["get", "risk_level"], "high"], [255, 140, 0],
+        ["==", ["get", "risk_level"], "critical"], [204, 0, 0],
+        [220, 220, 220],  # varsayılan
+    ]
+
+    layer = pdk.Layer(
+        "GeoJsonLayer",
+        geojson_enriched,
+        stroked=True,
+        get_line_color=[80, 80, 80],
+        line_width_min_pixels=0.5,
+        filled=True,
+        get_fill_color=color_expr,
+        pickable=True,
+        opacity=0.65,
+    )
+
+    tooltip = {
+        "html": "<b>ID:</b> {display_id}<br/><b>Risk:</b> {risk_level}<br/><b>Skor:</b> {risk_score_txt}",
+        "style": {"backgroundColor": "#262730", "color": "white"},
+    }
+
+    deck = pdk.Deck(
+        layers=[layer],
+        initial_view_state=pdk.ViewState(latitude=37.7749, longitude=-122.4194, zoom=10),
+        map_style="light",
+        tooltip=tooltip,
+    )
+    st.pydeck_chart(deck, use_container_width=True)
+
+    # Basit legend
+    st.markdown("""
+    <div style="display:flex;gap:12px;flex-wrap:wrap;font-size:14px;">
+      <div><span style="display:inline-block;width:14px;height:14px;background:#C8C8C8;border:1px solid #666;"></span> zero</div>
+      <div><span style="display:inline-block;width:14px;height:14px;background:rgb(56,168,0);border:1px solid #666;"></span> low</div>
+      <div><span style="display:inline-block;width:14px;height:14px;background:rgb(255,221,0);border:1px solid #666;"></span> medium</div>
+      <div><span style="display:inline-block;width:14px;height:14px;background:rgb(255,140,0);border:1px solid #666;"></span> high</div>
+      <div><span style="display:inline-block;width:14px;height:14px;background:rgb(204,0,0);border:1px solid #666;"></span> critical</div>
+    </div>
+    """, unsafe_allow_html=True)
+(geojson_enriched: dict):
     if not geojson_enriched:
         st.info("Haritayı görmek için GeoJSON bulunamadı."); return
     color_expr = [
