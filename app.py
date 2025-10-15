@@ -121,35 +121,62 @@ def _detect_geojson_id_len(gj: dict) -> int | None:
     return max(set(lens), key=lens.count) if lens else None
 
 def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
-    if not geojson_dict or day_df.empty: return geojson_dict
-    target_len = _detect_geojson_id_len(geojson_dict)
+    if not geojson_dict or day_df.empty:
+        return geojson_dict
+
+    target_len = _detect_geojson_id_len(geojson_dict) or 0
+
+    # risk tarafını normalize et
     day_df = day_df.copy()
     day_df["geoid"] = (
-        day_df["geoid"].astype(str).str.replace(r"\D", "", regex=True).str.zfill(target_len or 0)
+        day_df["geoid"]
+        .astype(str)
+        .str.replace(r"\D", "", regex=True)
+        .str.zfill(target_len if target_len > 0 else 0)
     )
+
+    # index'i de string yap
     dmap = day_df.set_index("geoid")
+    dmap.index = dmap.index.astype(str)
+
+    enriched_count = 0
     features_out = []
+
     for feat in geojson_dict.get("features", []):
         props = (feat.get("properties") or {}).copy()
+
+        # GeoJSON tarafındaki kimlik; varsa hemen display_id'yi doldur (fallback)
+        disp = props.get("GEOID") or props.get("geoid") or props.get("cell_id") or props.get("id")
+        if disp is not None:
+            props.setdefault("display_id", str(disp))
+
         key_raw = None
         for cand in ("geoid", "GEOID", "cell_id", "id"):
             if cand in props:
-                key_raw = str(props[cand]); break
-        if not key_raw:
-            features_out.append(feat); continue
-        key_norm = "".join(ch for ch in key_raw if ch.isdigit())
-        if target_len: key_norm = key_norm.zfill(target_len)
-        if key_norm in dmap.index:
-            row = dmap.loc[key_norm]
-            if isinstance(row, pd.DataFrame): row = row.iloc[0]
-            disp = props.get("GEOID") or props.get("geoid") or props.get("cell_id") or props.get("id")
-            props.update({
-                "display_id": disp,
-                "risk_score_daily": float(row["risk_score_daily"]),
-                "risk_level": row["risk_level"],
-                "risk_score_txt": f"{float(row['risk_score_daily']):.4f}",
-            })
+                key_raw = str(props[cand])
+                break
+
+        if key_raw:
+            key_norm = "".join(ch for ch in key_raw if ch.isdigit())
+            if target_len:
+                key_norm = key_norm.zfill(target_len)
+
+            # eşleşme varsa metrikleri enjekte et
+            if key_norm in dmap.index:
+                row = dmap.loc[key_norm]
+                if isinstance(row, pd.DataFrame):
+                    row = row.iloc[0]
+                props.update({
+                    "risk_score_daily": float(row["risk_score_daily"]),
+                    "risk_level": row["risk_level"],
+                    "risk_score_txt": f"{float(row['risk_score_daily']):.4f}",
+                })
+                enriched_count += 1
+
         features_out.append({**feat, "properties": props})
+
+    # küçük teşhis çıktısı
+    st.caption(f"Enjekte edilen feature sayısı: {enriched_count} / {len(geojson_dict.get('features', []))}")
     return {**geojson_dict, "features": features_out}
 
 # ---- GeoJSON akıllı yükleyici: local → artifact → raw ----
@@ -202,7 +229,7 @@ def make_map(geojson_enriched: dict):
         get_fill_color=color_expr, pickable=True, opacity=0.6,
     )
     tooltip = {
-        "text": "ID: {display_id}\nRisk: {risk_level}\nSkor: {risk_score_txt}",
+        "html": "<b>ID:</b> {display_id}<br/><b>Risk:</b> {risk_level}<br/><b>Skor:</b> {risk_score_txt}",
         "style": {"backgroundColor": "#262730", "color": "white"},
     }
     deck = pdk.Deck(
