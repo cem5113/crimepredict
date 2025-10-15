@@ -306,7 +306,7 @@ def make_map(geojson_enriched: dict):
         map_style="light",
         tooltip=tooltip,
     )
-    st.pydeck_chart(deck, use_container_width=False, height=700)
+    st.pydeck_chart(deck, use_container_width=True)
 
     # Basit legend
     st.markdown(
