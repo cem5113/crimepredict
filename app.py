@@ -1,10 +1,11 @@
 # Streamlit — Suç Risk Haritası (Günlük)
 # ------------------------------------------------------------
-# Bu uygulama açıldığında veriyi **otomatik** olarak GitHub Actions
-# artifact'inden indirir: `cem5113/crime_prediction_data` → `sf-crime-parquet.zip`.
-# Zip içinden `risk_hourly.parquet` (veya `risk_hourly.csv`) okunur,
-# hour_range göz ardı edilip **GÜNLÜK ortalama** risk hesaplanır ve
-# GEOID bazında 4 seviyeli (low/medium/high/critical) bir harita üretilir.
+# Bu uygulama, veriyi GitHub Actions artifact'inden okur:
+#   repo: cem5113/crime_prediction_data
+#   artifact: sf-crime-parquet.zip
+# Zip içinden:
+#   - risk_hourly.parquet -> günlük (geoid×date) risk ortalaması + çeyreklerle sınıflandırma
+#   - data/sf_cells.geojson -> harita sınırları (aynı zip içinden)
 # ------------------------------------------------------------
 
 import io
@@ -18,147 +19,116 @@ import streamlit as st
 import pydeck as pdk
 import requests
 
-# ------------------------------------------------------------
-# Ayarlar — Gerekli depolar ve artifact adı
-# ------------------------------------------------------------
+# =========================
+# Ayarlar
+# =========================
 OWNER = "cem5113"
 REPO = "crime_prediction_data"
-
-# GeoJSON farklı bir repoda olabilir (ör. cem5113/crimepredict)
-GEOJSON_OWNER = st.secrets.get("geojson_owner", OWNER)
-GEOJSON_REPO = st.secrets.get("geojson_repo", REPO)
 ARTIFACT_NAME = "sf-crime-parquet"
-EXPECTED_PARQUET = "risk_hourly.parquet"
-EXPECTED_CSV = "risk_hourly.csv"
+EXPECTED_PARQUET = "risk_hourly.parquet"         # artifact içinde
+GEOJSON_IN_ZIP_PATH_DEFAULT = "data/sf_cells.geojson"  # artifact içinde
 
-# GitHub Token:
-# - Public repo olsa bile, Actions artifact indirmek için **token gerekir**.
-# - Token'ı Streamlit Secrets'a `github_token` olarak ekleyin
-#   (Settings → Secrets → github_token)
+# Actions artifact indirmek için token şart
 GITHUB_TOKEN = st.secrets.get("github_token", os.environ.get("GITHUB_TOKEN", ""))
 
-# ------------------------------------------------------------
-# Yardımcılar — İndirme & Okuma
-# ------------------------------------------------------------
+# UI config (ilk satırlarda olsun)
+st.set_page_config(page_title="Suç Risk Haritası (Günlük)", layout="wide")
+st.title("Suç Risk Haritası — Günlük Ortalama (low / medium / high / critical)")
 
-@st.cache_data(show_spinner=True, ttl=15*60)
+# =========================
+# Yardımcılar
+# =========================
+def _gh_headers():
+    hdrs = {"Accept": "application/vnd.github+json"}
+    if GITHUB_TOKEN:
+        hdrs["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+    return hdrs
+
+@st.cache_data(show_spinner=True, ttl=15 * 60)
 def fetch_latest_artifact_zip(owner: str, repo: str, artifact_name: str) -> bytes:
-    """Repo'daki son **geçerli** (expired=false) artifact'i bulur ve ZIP bytes döndürür."""
+    """Repo'daki son geçerli (expired=false) artifact'i indirip ZIP bytes döndürür."""
     if not GITHUB_TOKEN:
-        raise RuntimeError(
-            "GitHub token bulunamadı. lütfen st.secrets['github_token'] veya GITHUB_TOKEN env. değişkeni ayarlayın.")
+        raise RuntimeError("GitHub token yok. `st.secrets['github_token']` veya GITHUB_TOKEN env ayarlayın.")
 
     base = f"https://api.github.com/repos/{owner}/{repo}/actions/artifacts"
-    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
-
-    # Sayfalanmış olabilir; basitçe ilk sayfayı alıp isim eşleyenleri filtreleriz
-    r = requests.get(base, headers=headers, timeout=30)
+    r = requests.get(base, headers=_gh_headers(), timeout=30)
     r.raise_for_status()
     items = r.json().get("artifacts", [])
-    # İsim eşleşen, süresi dolmamış olanları tarihine göre sırala
     cand = [a for a in items if a.get("name") == artifact_name and not a.get("expired", False)]
     if not cand:
         raise FileNotFoundError(f"Artifact bulunamadı: {artifact_name}")
     cand.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
     artifact = cand[0]
 
-    download_url = artifact.get("archive_download_url")
-    if not download_url:
+    url = artifact.get("archive_download_url")
+    if not url:
         raise RuntimeError("archive_download_url bulunamadı")
 
-    r2 = requests.get(download_url, headers=headers, timeout=60)
+    r2 = requests.get(url, headers=_gh_headers(), timeout=60)
     r2.raise_for_status()
     return r2.content
 
-
-@st.cache_data(show_spinner=True, ttl=15*60)
+@st.cache_data(show_spinner=True, ttl=15 * 60)
 def read_risk_from_artifact() -> pd.DataFrame:
-    """ZIP içinden Parquet/CSV'yi okuyup kolonları normalize eder."""
+    """Artifact ZIP içindeki risk_hourly.parquet -> DataFrame (kolonlar normalize)."""
     zip_bytes = fetch_latest_artifact_zip(OWNER, REPO, ARTIFACT_NAME)
-
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         memlist = zf.namelist()
-        target = EXPECTED_PARQUET if EXPECTED_PARQUET in memlist else (
-            EXPECTED_CSV if EXPECTED_CSV in memlist else None)
-        if target is None:
-            raise FileNotFoundError(
-                f"Zip içinde {EXPECTED_PARQUET} veya {EXPECTED_CSV} bulunamadı. İçerik: {memlist}")
+        if EXPECTED_PARQUET not in memlist:
+            # alt klasör olasılığına karşı sondan eşleşme ara
+            matches = [n for n in memlist if n.endswith("/" + EXPECTED_PARQUET) or n.endswith(EXPECTED_PARQUET)]
+            if not matches:
+                raise FileNotFoundError(f"Zip içinde {EXPECTED_PARQUET} bulunamadı. İçerik örneği: {memlist[:15]}")
+            target = matches[0]
+        else:
+            target = EXPECTED_PARQUET
+
         with zf.open(target) as f:
-            if target.endswith(".parquet"):
-                df = pd.read_parquet(f)
-            else:
-                df = pd.read_csv(f)
+            df = pd.read_parquet(f)
 
-    # kolon isimleri
+    # kolon adlarını normalize et
     df.columns = [c.strip().lower() for c in df.columns]
-    # esnek yeniden adlandırma
-    rename_map = {}
-    for src, dst in [
-        ('geoid', 'geoid'),
-        ('date', 'date'),
-        ('hour_range', 'hour_range'),
-        ('risk_score', 'risk_score'),
-    ]:
-        if src in df.columns and dst not in df.columns:
-            rename_map[src] = dst
-    if rename_map:
-        df = df.rename(columns=rename_map)
-
-    # tarih
-    if 'date' in df.columns:
-        df['date'] = pd.to_datetime(df['date']).dt.date
-
+    # tarih formatı
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"]).dt.date
     return df
 
-
 def daily_average(df: pd.DataFrame) -> pd.DataFrame:
-    """geoid×date bazında günlük ortalama risk skoru."""
+    """geoid×date bazında günlük ortalama risk skoru (hour_range dikkate alınmaz)."""
     if df.empty:
         return df
-    needed = {'geoid', 'date', 'risk_score'}
+    needed = {"geoid", "date", "risk_score"}
     missing = needed - set(df.columns)
     if missing:
         raise ValueError(f"Eksik kolon(lar): {', '.join(sorted(missing))}")
-
-    daily = (
-        df.groupby(['geoid', 'date'], as_index=False)['risk_score']
+    out = (
+        df.groupby(["geoid", "date"], as_index=False)["risk_score"]
           .mean()
-          .rename(columns={'risk_score': 'risk_score_daily'})
+          .rename(columns={"risk_score": "risk_score_daily"})
     )
-    return daily
-
+    return out
 
 def classify_quantiles(daily_df: pd.DataFrame, day: date) -> pd.DataFrame:
-    """Seçilen gün için low/medium/high/critical etiketleri (Q25/Q50/Q75)."""
-    one = daily_df[daily_df['date'] == day].copy()
+    """Seçilen gün için low/medium/high/critical (Q25/Q50/Q75)."""
+    one = daily_df[daily_df["date"] == day].copy()
     if one.empty:
         return one
+    q25, q50, q75 = one["risk_score_daily"].quantile([0.25, 0.5, 0.75]).tolist()
 
-    q25, q50, q75 = one['risk_score_daily'].quantile([0.25, 0.50, 0.75]).tolist()
-
-    def labeler(x):
+    def lab(x: float) -> str:
         if x <= q25:
-            return 'low'
+            return "low"
         elif x <= q50:
-            return 'medium'
+            return "medium"
         elif x <= q75:
-            return 'high'
-        else:
-            return 'critical'
+            return "high"
+        return "critical"
 
-    one['risk_level'] = one['risk_score_daily'].apply(labeler)
-    one['q25'] = q25
-    one['q50'] = q50
-    one['q75'] = q75
+    one["risk_level"] = one["risk_score_daily"].apply(lab)
+    one["q25"] = q25
+    one["q50"] = q50
+    one["q75"] = q75
     return one
-
-
-@st.cache_data(show_spinner=False)
-def load_geojson(uploaded_geojson) -> dict:
-    # Manuel yükleme yolunu koruyoruz (yan panelde opsiyonel)
-    if uploaded_geojson is None:
-        return {}
-    return json.load(uploaded_geojson)
 
 def _detect_geojson_id_len(gj: dict) -> int | None:
     """GeoJSON'da en sık görülen sayısal ID uzunluğunu (örn. 12) bulur."""
@@ -175,7 +145,6 @@ def _detect_geojson_id_len(gj: dict) -> int | None:
                 break
     if not lens:
         return None
-    # moda
     return max(set(lens), key=lens.count)
 
 def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
@@ -196,7 +165,7 @@ def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
     for feat in geojson_dict.get("features", []):
         props = (feat.get("properties") or {}).copy()
 
-        # GeoJSON tarafındaki anahtar
+        # GeoJSON tarafındaki kimlik anahtarı
         key_raw = None
         for cand in ("geoid", "GEOID", "cell_id", "id"):
             if cand in props:
@@ -216,8 +185,6 @@ def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
             row = dmap.loc[key_norm]
             if isinstance(row, pd.DataFrame):
                 row = row.iloc[0]
-
-            # tooltip için tekil ID + formatlı skor
             disp = props.get("GEOID") or props.get("geoid") or props.get("cell_id") or props.get("id")
             props.update({
                 "display_id": disp,
@@ -230,11 +197,26 @@ def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
 
     return {**geojson_dict, "features": features_out}
 
+@st.cache_data(show_spinner=True, ttl=60 * 60)
+def fetch_geojson_from_artifact(path_in_zip: str) -> dict:
+    """Aynı Actions artifact (sf-crime-parquet.zip) içinde verilen yolu arar ve GeoJSON döndürür."""
+    zip_bytes = fetch_latest_artifact_zip(OWNER, REPO, ARTIFACT_NAME)
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        memlist = zf.namelist()
+        # tam/sondan eşleşme
+        candidates = [n for n in memlist if n.endswith("/" + path_in_zip) or n.endswith(path_in_zip)]
+        if not candidates:
+            st.warning(f"GeoJSON '{path_in_zip}' ZIP içinde yok. İlk 20 dosya: {memlist[:20]}")
+            return {}
+        with zf.open(candidates[0]) as f:
+            return json.load(io.TextIOWrapper(f, encoding="utf-8"))
+
 def make_map(geojson_enriched: dict):
     if not geojson_enriched:
         st.info("Haritayı görmek için GeoJSON bulunamadı.")
         return
 
+    # low=yeşil, medium=sarı, high=turuncu, critical=kırmızı
     color_expr = [
         "case",
         ["==", ["get", "risk_level"], "low"], [56, 168, 0],
@@ -266,157 +248,87 @@ def make_map(geojson_enriched: dict):
         tooltip=tooltip,
     )
     st.pydeck_chart(deck, use_container_width=True)
-# ------------------------------------------------------------
-# UI
-# ------------------------------------------------------------
 
-st.set_page_config(page_title="Suç Risk Haritası (Günlük)", layout="wide")
-st.title("Suç Risk Haritası — Günlük Ortalama (low / medium / high / critical)")
+# =========================
+# UI Akışı
+# =========================
+st.sidebar.header("GitHub Artifact")
+refresh = st.sidebar.button("Veriyi Yenile (artifact'i tazele)")
 
-st.sidebar.header("GitHub Artifact (otomatik)")
-refresh = st.sidebar.button("Veriyi Yenile (artifact'ten yeniden çek)")
-
-# Veri çek
+# Risk verisini çek
 try:
     if refresh:
-        read_risk_from_artifact.clear()
+        # cache temizle
         fetch_latest_artifact_zip.clear()
+        read_risk_from_artifact.clear()
+        fetch_geojson_from_artifact.clear()
     risk_df = read_risk_from_artifact()
 except Exception as e:
     st.error(f"Artifact indirilemedi/okunamadı: {e}")
     st.stop()
 
-# Günlük ortalama
+# Günlük ortalama + tarih seçimi
 risk_daily = daily_average(risk_df)
+dates = sorted(risk_daily["date"].unique())
+sel_date = st.sidebar.selectbox(
+    "Gün seçin",
+    dates,
+    index=len(dates) - 1 if dates else 0,
+    format_func=lambda d: str(d),
+)
 
-# Tarih seçimi
-dates = sorted(risk_daily['date'].unique())
-sel_date = st.sidebar.selectbox("Gün seçin", dates, index=len(dates)-1 if dates else 0, format_func=lambda d: str(d))
-
-# Sınıflandırma (per-gün çeyrekler)
-st.sidebar.subheader("Sınıflandırma")
 one_day = classify_quantiles(risk_daily, sel_date)
 
-# Eşikler
+# Eşikler (Q25/Q50/Q75)
 if not one_day.empty:
     c1, c2, c3 = st.columns(3)
-    with c1: st.metric("Q25", f"{one_day['q25'].iloc[0]:.4f}")
-    with c2: st.metric("Q50", f"{one_day['q50'].iloc[0]:.4f}")
-    with c3: st.metric("Q75", f"{one_day['q75'].iloc[0]:.4f}")
+    c1.metric("Q25", f"{one_day['q25'].iloc[0]:.4f}")
+    c2.metric("Q50", f"{one_day['q50'].iloc[0]:.4f}")
+    c3.metric("Q75", f"{one_day['q75'].iloc[0]:.4f}")
 
-# GeoJSON — otomatik getir + manuel seçenek
-@st.cache_data(show_spinner=True, ttl=60*60)
-def fetch_geojson_auto() -> dict:
-    """Sırayla dener:
-    1) Artifact ZIP (OWNER/REPO) içinde `geojson_path`
-    2) Repo contents API (GEOJSON_OWNER/GEOJSON_REPO içinde `geojson_path`)
-    3) raw.githubusercontent (public ise) veya secrets: `geojson_url`
-    """
-    path = st.session_state.get('geojson_path_ui') or st.secrets.get("geojson_path", "sf_cells.geojson")
-    url_override = st.secrets.get("geojson_url", "")
-
-    # 1) Artifact içinden dene (crime_prediction_data)
-    try:
-        zip_bytes = fetch_latest_artifact_zip(OWNER, REPO, ARTIFACT_NAME)
-        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-            memlist = zf.namelist()
-            st.session_state['zip_manifest'] = memlist
-            if path in memlist:
-                with zf.open(path) as f:
-                    return json.load(io.TextIOWrapper(f, encoding="utf-8"))
-            cand = [n for n in memlist if n.endswith('/'+path) or n.endswith(path)]
-            if cand:
-                with zf.open(cand[0]) as f:
-                    return json.load(io.TextIOWrapper(f, encoding="utf-8"))
-    except Exception as e:
-        st.session_state['zip_error'] = str(e)
-
-    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
-
-    # 2) Repo contents API (GEOJSON_OWNER/GEOJSON_REPO)
-    try:
-        api = f"https://api.github.com/repos/{GEOJSON_OWNER}/{GEOJSON_REPO}/contents/{path}"
-        r = requests.get(api, headers=headers, timeout=30)
-        st.session_state['repo_contents_status'] = r.status_code
-        if r.status_code == 200:
-            b64 = r.json().get('content', '')
-            if b64:
-                import base64
-                data = base64.b64decode(b64)
-                return json.loads(data.decode('utf-8'))
-    except Exception as e:
-        st.session_state['repo_error'] = str(e)
-
-    # 2b) Public raw URL denemesi (token gerektirmez)
-    try:
-        raw = f"https://raw.githubusercontent.com/{GEOJSON_OWNER}/{GEOJSON_REPO}/main/{path}"
-        r = requests.get(raw, timeout=30)
-        st.session_state['raw_status'] = r.status_code
-        if r.status_code == 200:
-            return r.json()
-    except Exception as e:
-        st.session_state['raw_error'] = str(e)
-
-    # 3) Direkt URL override
-    if url_override:
-        r = requests.get(url_override, headers=headers if GITHUB_TOKEN else None, timeout=30)
-        st.session_state['geojson_url_status'] = r.status_code
-        if r.status_code == 200:
-            return r.json()
-
-    return {}
-
-# GeoJSON seçenekleri
+# GeoJSON yolunu artifact içinden seçtir
 st.sidebar.header("Harita Sınırları (GeoJSON)")
-st.sidebar.caption("Varsayılan: data/sf_cells.geojson (cem5113/crimepredict)")
-st.session_state['geojson_path_ui'] = st.sidebar.text_input(
-    "GeoJSON dosya adı / yolu",
-    value=st.secrets.get("geojson_path", "data/sf_cells.geojson")
+geojson_path_in_zip = st.sidebar.text_input(
+    "Artifact ZIP içindeki GeoJSON yolu",
+    value=GEOJSON_IN_ZIP_PATH_DEFAULT,
+    help="Örn: data/sf_cells.geojson",
 )
-# Ayrı repo kullanıyorsak secrets ile belirtilebilir, UI'dan da gösterelim
-st.sidebar.text_input("GeoJSON repo (owner/repo)",
-    value=f"{GEOJSON_OWNER}/{GEOJSON_REPO}", disabled=True)
-geojson_file = st.sidebar.file_uploader("(Opsiyonel) Yerel GeoJSON yükle", type=["json","geojson"]) 
 
-geojson = load_geojson(geojson_file) if geojson_file else fetch_geojson_auto()
-
+# GeoJSON'u artifact'ten al, risk metriklerini enjekte et ve haritayı çiz
+geojson = fetch_geojson_from_artifact(geojson_path_in_zip)
 st.subheader(f"Harita — {sel_date}")
 if not geojson:
-    st.warning("GeoJSON otomatik bulunamadı. Aşağıdaki teşhis bilgilerini kontrol edin veya dosya adını doğru girin.")
+    st.warning("GeoJSON artifact içinde bulunamadı. Yan paneldeki yolu kontrol edin.")
 else:
     enriched = inject_properties(geojson, one_day)
     make_map(enriched)
 
-with st.expander("Teşhis (GeoJSON)"):
-    st.write({
-        'geojson_path_attempted': st.session_state.get('geojson_path_ui') or st.secrets.get('geojson_path','sf_cells.geojson'),
-        'zip_error': st.session_state.get('zip_error'),
-        'zip_manifest_head': (st.session_state.get('zip_manifest') or [])[:20],
-        'repo_status': st.session_state.get('repo_contents_status'),
-        'repo_error': st.session_state.get('repo_error'),
-        'geojson_url_status': st.session_state.get('geojson_url_status'),
-    })
+# Teşhis bilgileri
+with st.expander("Teşhis (Artifact İçeriği)"):
+    try:
+        zip_bytes = fetch_latest_artifact_zip(OWNER, REPO, ARTIFACT_NAME)
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            mem = zf.namelist()
+        st.write({
+            "artifact": f"{OWNER}/{REPO} → {ARTIFACT_NAME}.zip",
+            "geojson_path_in_zip": geojson_path_in_zip,
+            "zip_manifest_head": mem[:20],
+        })
+    except Exception as e:
+        st.write({"artifact_error": str(e)})
 
-# Tablo + indirme
+# Tablo + indirme (ekrandaki DF'ten CSV üretimi)
 st.subheader("Seçilen Gün Tablosu")
-st.dataframe(one_day.sort_values('risk_score_daily', ascending=False), use_container_width=True)
-
-csv = one_day.drop(columns=['q25','q50','q75'], errors='ignore').to_csv(index=False).encode('utf-8')
+st.dataframe(
+    one_day.drop(columns=["q25", "q50", "q75"], errors="ignore").sort_values(
+        "risk_score_daily", ascending=False
+    ),
+    use_container_width=True,
+)
+csv = one_day.drop(columns=["q25", "q50", "q75"], errors="ignore").to_csv(index=False).encode("utf-8")
 st.download_button(
     label="Günlük tabloyu CSV indir",
     data=csv,
     file_name=f"risk_daily_{sel_date}.csv",
     mime="text/csv",
 )
-
-with st.expander("Nasıl çalışır?"):
-    st.markdown(
-        """
-        - **Veri Kaynağı:** GitHub Actions artifact → **`sf-crime-parquet.zip`** (repo: `cem5113/crime_prediction_data`).
-        - **Kimlik Doğrulama:** Streamlit secrets içine `github_token` ekleyin (Actions → Artifacts okuma yetkisiyle).
-        - **Günlük Ortalama:** `hour_range` göz ardı edilerek aynı gün içindeki kayıtların ortalaması alınır.
-        - **4 Seviye:** Günlük dağılıma göre çeyrekler: `low (≤Q25)`, `medium (Q25–Q50)`, `high (Q50–Q75)`, `critical (>Q75)`.
-        - **Harita:** GeoJSON'daki **GEOID** eşleşir; renkler: low=yeşil, medium=sarı, high=turuncu, critical=kırmızı.
-        - **Yenile:** Sol menüden artifact'i yeniden çekebilirsiniz.
-        """
-    )
