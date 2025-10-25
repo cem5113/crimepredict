@@ -5,7 +5,7 @@
 # harita üzerinde (hover) her hücre için en olası 3 suç türü ve en olası zaman aralıklarını gösterir.
 # Veri kaynakları GitHub Actions artifact'larından okunur:
 #  - fr-crime-pipeline-output: fr_crime_09.parquet  (geçmiş olay+özellikler)
-#  - crime_prediction_data / sf-crime-parquet: risk_hourly.parquet (varsa genel risk/şimdiki skor)
+#  - crime_prediction_data / sf-crime-parquet: risk_hourly.parquet ve/veya stacking nowcast/parquet (opsiyonel)
 #
 # Not: Bu forecast, kolluk için yalın ve hızlı çalışacak şekilde tasarlandı:
 #  - “Son X gün + saat-of-day + gün-of-week” ağırlıklı bir profil hesabı (recency-weighting)
@@ -18,7 +18,7 @@
 #  - 911/311 kısa vadeli sinyalleriyle nowcast düzeltmesi
 #  - ETS/Prophet/TFT gibi modellerle GEOID×kategori bazlı ileri forecast
 
-import io, os, json, zipfile
+import io, os, json, zipfile, re
 from datetime import datetime, timedelta, date
 from typing import List, Dict, Tuple
 import pandas as pd
@@ -82,7 +82,6 @@ def fetch_latest_artifact_zip(owner: str, repo: str, artifact_name: str | None =
     r = requests.get(base, headers=gh_headers(), timeout=30)
     r.raise_for_status()
     items = r.json().get("artifacts", [])
-    # En güncel ve süresi geçmemiş olanı seç; isim filtrelemesi opsiyonel
     cand = [a for a in items if not a.get("expired", False)]
     if artifact_name:
         cand = [a for a in cand if a.get("name") == artifact_name]
@@ -106,9 +105,33 @@ def read_parquet_from_artifact(owner: str, repo: str, wanted_suffix: str, artifa
             raise FileNotFoundError(f"Zip içinde {wanted_suffix} yok. Örnek içerik: {memlist[:15]}")
         with zf.open(matches[0]) as f:
             df = pd.read_parquet(f)
-    # Kolon isimlerini normalize et
     df.columns = [str(c).strip() for c in df.columns]
     return df
+
+@st.cache_data(show_spinner=True, ttl=15*60)
+def list_zip_members(owner: str, repo: str, artifact_name: str | None = None) -> list[str]:
+    zip_bytes = fetch_latest_artifact_zip(owner, repo, artifact_name)
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        return zf.namelist()
+
+@st.cache_data(show_spinner=True, ttl=15*60)
+def read_json_from_artifact(owner: str, repo: str, wanted_suffix: str, artifact_name: str | None = None) -> dict:
+    zip_bytes = fetch_latest_artifact_zip(owner, repo, artifact_name)
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        memlist = zf.namelist()
+        matches = [n for n in memlist if n.endswith("/" + wanted_suffix) or n.endswith(wanted_suffix)]
+        if not matches:
+            raise FileNotFoundError(f"Zip içinde {wanted_suffix} yok.")
+        with zf.open(matches[0]) as f:
+            return json.load(io.TextIOWrapper(f, encoding="utf-8"))
+
+def _find_first_by_patterns(names: list[str], patterns: list[str]) -> str | None:
+    for p in patterns:
+        rx = re.compile(p)
+        for n in names:
+            if rx.search(n):
+                return n
+    return None
 
 # ---------- GeoJSON getir ----------
 @st.cache_data(show_spinner=True, ttl=60*60)
@@ -148,11 +171,9 @@ def ensure_datetime(df: pd.DataFrame) -> pd.DataFrame:
     elif "date" in df.columns and "event_hour" in df.columns:
         df["datetime"] = pd.to_datetime(df["date"].astype(str) + " " + df["event_hour"].astype(str) + ":00:00", errors="coerce")
     else:
-        # En azından date alanı olsun
         if "date" in df.columns:
             df["datetime"] = pd.to_datetime(df["date"], errors="coerce")
         else:
-            # son çare: index
             df["datetime"] = pd.to_datetime(df.index, errors="coerce")
     df["date"] = df["datetime"].dt.date
     df["hour"] = df["datetime"].dt.hour
@@ -176,23 +197,18 @@ def recency_weight(ts: pd.Series, halflife_days: float = 14.0) -> pd.Series:
 @st.cache_data(show_spinner=True, ttl=10*60)
 def build_hourly_profile(df: pd.DataFrame, last_n_days: int = 90, halflife_days: float = 14.0,
                          use_y_label: bool = True) -> pd.DataFrame:
-    base = df.copy()
-    base = base.sort_values("datetime")
-    # Son N gün filtresi
+    base = df.copy().sort_values("datetime")
     if last_n_days:
         cutoff = base["datetime"].max() - pd.Timedelta(days=last_n_days)
         base = base.loc[base["datetime"] >= cutoff]
-    # Ağırlık: zaman yakınlığı
     w = recency_weight(base["datetime"], halflife_days=halflife_days)
     base["w"] = w.values
-    # Olay sinyali: Y_label varsa onu kullan, yoksa 1
     if use_y_label and "Y_label" in base.columns:
         sig = (base["Y_label"].astype(float).clip(0,1))
     else:
         sig = 1.0
     base["signal"] = sig
 
-    # GEOID normalizasyonu
     if "GEOID" in base.columns:
         base["geoid"] = base["GEOID"].map(normalize_geoid)
     elif "geoid" in base.columns:
@@ -202,29 +218,22 @@ def build_hourly_profile(df: pd.DataFrame, last_n_days: int = 90, halflife_days:
     else:
         base["geoid"] = ""
 
-    # Eksik kategori -> "Unknown"
     if "category" not in base.columns:
         base["category"] = "Unknown"
 
-    # Gün/ saat
     base = ensure_datetime(base)
-
-    # Gün-of-week conditioning (dilersek benzer günleri ağır basacak şekilde)
     base["dow"] = base["dow"].fillna(-1).astype(int)
 
-    # Weighted olay beklentisi: geoid×category×hour (ve opsiyonel DOW)
     grp = base.groupby(["geoid", "category", "dow", "hour"], as_index=False).agg(
-        exp_events=("signal", lambda x: float(np.sum(x))) ,
+        exp_events=("signal", lambda x: float(np.sum(x))),
         w_mean=("w", "mean"),
         n=("signal", "size")
     )
-    # beklenen skor = exp_events * w_mean  (basitçe ağırlıklandırma)
     grp["score"] = grp["exp_events"] * grp["w_mean"]
-    # Normalizasyon: her geoid×dow için kategori×saat skoru -> olasılığa ölçekle
     norm = grp.groupby(["geoid", "dow"], as_index=False)["score"].sum().rename(columns={"score":"tot"})
     out = grp.merge(norm, on=["geoid","dow"], how="left")
     out["prob"] = np.where(out["tot"]>0, out["score"]/out["tot"], 0.0)
-    return out  # kolonlar: geoid, category, dow, hour, prob
+    return out  # geoid, category, dow, hour, prob
 
 # Seçili DOW senaryosuna göre (ör. forecast başlangıç gününün DOW'u) next H saat için dağıtım
 @st.cache_data(show_spinner=True, ttl=10*60)
@@ -236,27 +245,24 @@ def forecast_next_hours(profile: pd.DataFrame, start_dt: datetime, horizon_h: in
         t = start_dt + timedelta(hours=h)
         dow = t.weekday()
         hr = t.hour
-        # geoid×category×dow×hour prob
         sl = profile[(profile["dow"]==dow) & (profile["hour"]==hr)]
         if sl.empty:
-            # fallback: dow bağımsız
             sl = profile[profile["hour"]==hr].copy()
         if sl.empty:
             continue
         tmp = sl.copy()
         tmp["ts"] = t
         rows.append(tmp)
-    fc = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=list(profile.columns)+["ts"]) 
-    return fc  # kolonlar: geoid, category, dow, hour, prob, ts
+    fc = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=list(profile.columns)+["ts"])
+    return fc  # geoid, category, dow, hour, prob, ts
 
 # Top-3 kategori ve saat bloklarını biçimle
-
 def contiguous_blocks(hours: List[int]) -> List[Tuple[int,int]]:
     if not hours: return []
     hours = sorted(set(int(h)%24 for h in hours))
     blocks = []
     start = prev = hours[0]
-    for h in hours[1:]+[hours[0]]:  # wrap check
+    for h in hours[1:]+[hours[0]]:
         if (h-prev) % 24 != 1:
             blocks.append((start, prev))
             start = h
@@ -264,14 +270,12 @@ def contiguous_blocks(hours: List[int]) -> List[Tuple[int,int]]:
     if blocks and blocks[0] == (start, prev):
         return [blocks[0]]
     blocks.append((start, prev))
-    # En fazla ilk 2 blok
     return blocks[:2]
 
 def format_block(b: Tuple[int,int]) -> str:
     a,bh = b
     if a==bh:
         return f"{a:02d}:00"
-    # sarma varsa iki parça göster
     if (bh - a) % 24 < (a - bh) % 24:
         return f"{a:02d}:00–{bh:02d}:59"
     return f"{a:02d}:00–{bh:02d}:59"
@@ -281,17 +285,13 @@ def summarize_top3(fc: pd.DataFrame, geoid_list: List[str]) -> pd.DataFrame:
     if fc.empty:
         return pd.DataFrame(columns=["geoid","rank","category","share","peak_hours"])
     sl = fc[fc["geoid"].isin(geoid_list)].copy()
-    # geoid×category toplam olasılık payı (horizon içinde)
     g = sl.groupby(["geoid","category"], as_index=False)["prob"].sum().rename(columns={"prob":"prob_sum"})
-    # geoid bazında normalize
     tot = g.groupby("geoid", as_index=False)["prob_sum"].sum().rename(columns={"prob_sum":"tot"})
     g = g.merge(tot, on="geoid", how="left")
     g["share"] = np.where(g["tot"]>0, g["prob_sum"]/g["tot"], 0.0)
-    # Top-3 seç
     ranks = []
     for geoid, sub in g.groupby("geoid"):
         sub = sub.sort_values("share", ascending=False).head(3)
-        # her kategori için pik saatleri bul: prob'a göre ilk %30 kitleyi taşıyan saatler
         peaks = []
         for _, r in sub.iterrows():
             cat = r["category"]
@@ -303,7 +303,6 @@ def summarize_top3(fc: pd.DataFrame, geoid_list: List[str]) -> pd.DataFrame:
             if not hh.empty:
                 csum = (hh["prob"].cumsum()/hh["prob"].sum()).fillna(0)
                 top_hours = hh.loc[csum<=0.30, "hour"].astype(int).tolist()
-                # saat bloklarına dönüştür (en fazla 2 blok)
                 blks = contiguous_blocks(top_hours) if top_hours else []
                 label = ", ".join(format_block(b) for b in blks) if blks else "—"
             else:
@@ -329,7 +328,6 @@ def inject_properties_top3(geojson_dict: dict, top3_df: pd.DataFrame, risk_daily
     if not geojson_dict:
         return geojson_dict
     feats = geojson_dict.get("features", [])
-    # quick lookup
     tmap: Dict[str, pd.DataFrame] = {
         g: sub.sort_values("rank").reset_index(drop=True)
         for g, sub in top3_df.groupby("geoid")
@@ -337,7 +335,6 @@ def inject_properties_top3(geojson_dict: dict, top3_df: pd.DataFrame, risk_daily
     rmap = None
     if risk_daily_df is not None and not risk_daily_df.empty:
         rmap = risk_daily_df.set_index("geoid")["risk_score_daily"].to_dict()
-        # eşiklere göre renk
         if not risk_daily_df.empty:
             q25, q50, q75 = (
                 risk_daily_df["risk_score_daily"].quantile([0.25,0.5,0.75]).tolist()
@@ -354,7 +351,6 @@ def inject_properties_top3(geojson_dict: dict, top3_df: pd.DataFrame, risk_daily
         if rmap is not None and geoid in rmap:
             val = float(rmap[geoid])
             props["risk_score_daily"] = val
-            # basit renkleme: q25/50/75
             if val <= q25: lvl = "düşük"
             elif val <= q50: lvl = "orta"
             elif val <= q75: lvl = "yüksek"
@@ -365,7 +361,7 @@ def inject_properties_top3(geojson_dict: dict, top3_df: pd.DataFrame, risk_daily
         if geoid in tmap:
             sub = tmap[geoid]
             lines = []
-            for i, rr in sub.iterrows():
+            for _, rr in sub.iterrows():
                 pct = f"{rr['share']*100:.1f}%"
                 ph = rr["peak_hours"]
                 lines.append(f"{rr['rank']}. {rr['category']} • {pct} • {ph}")
@@ -411,11 +407,9 @@ except Exception as e:
 # Opsiyonel risk dosyası (genel renk için)
 try:
     df_risk = read_parquet_from_artifact(OWNER_MAIN, REPO_MAIN, EXPECTED_RISK_PARQUET, ARTIFACT_RISK)
-    # günlük ortalama
     if not df_risk.empty:
         cols = [c.lower().strip() for c in df_risk.columns]
         df_risk.columns = cols
-        # risk_score/ geoid / date esnek eşleme
         if "risk_score" not in df_risk.columns:
             for alt in ("risk","score","prob","probability"):
                 if alt in df_risk.columns:
@@ -427,26 +421,87 @@ try:
         if "date" in df_risk.columns:
             df_risk["date"] = pd.to_datetime(df_risk["date"]).dt.date
             risk_daily = (
-                df_risk.groupby([df_risk["geoid"].map(lambda x: ''.join(ch for ch in str(x) if str(ch).isdigit()).zfill(11)[:11]), "date"], as_index=False)["risk_score"].mean()
-                .rename(columns={"geoid":"geoid_norm","risk_score":"risk_score_daily"})
+                df_risk.groupby(
+                    [df_risk["geoid"].map(lambda x: ''.join(ch for ch in str(x) if str(ch).isdigit()).zfill(11)[:11]), "date"],
+                    as_index=False
+                )["risk_score"].mean().rename(columns={"geoid":"geoid_norm","risk_score":"risk_score_daily"})
             )
-            # Son gün
             if not risk_daily.empty:
                 last_day = max(risk_daily["date"])
-                risk_today = risk_daily[risk_daily["date"]==last_day].copy()
-                risk_today = risk_today.rename(columns={"geoid_norm":"geoid"})
+                risk_today = risk_daily[risk_daily["date"]==last_day].copy().rename(columns={"geoid_norm":"geoid"})
             else:
-                risk_today = pd.DataFrame(columns=["geoid","risk_score_daily"]) 
+                risk_today = pd.DataFrame(columns=["geoid","risk_score_daily"])
         else:
-            risk_today = pd.DataFrame(columns=["geoid","risk_score_daily"]) 
+            risk_today = pd.DataFrame(columns=["geoid","risk_score_daily"])
     else:
-        risk_today = pd.DataFrame(columns=["geoid","risk_score_daily"]) 
+        risk_today = pd.DataFrame(columns=["geoid","risk_score_daily"])
 except Exception:
-    risk_today = pd.DataFrame(columns=["geoid","risk_score_daily"]) 
+    risk_today = pd.DataFrame(columns=["geoid","risk_score_daily"])
+
+# ---------- (Opsiyonel) Stacking nowcast + metrikler ----------
+try:
+    sf_members = list_zip_members(OWNER_MAIN, REPO_MAIN, ARTIFACT_RISK)
+except Exception:
+    sf_members = []
+
+# Nowcast/parquet dosyasını desenlerle bul
+df_nowcast = pd.DataFrame()
+stacking_metrics = {}
+
+try:
+    if sf_members:
+        pred_name = _find_first_by_patterns(
+            sf_members,
+            patterns=[
+                r"(?:^|/)(stacking|model|pred).*hour.*\.parquet$",
+                r"(?:^|/)predictions?_hourly\.parquet$",
+                r"(?:^|/)risk_hourly\.parquet$"
+            ]
+        )
+        if pred_name:
+            with zipfile.ZipFile(io.BytesIO(fetch_latest_artifact_zip(OWNER_MAIN, REPO_MAIN, ARTIFACT_RISK))) as zf:
+                with zf.open(pred_name) as f:
+                    df_nowcast = pd.read_parquet(f)
+            df_nowcast.columns = [str(c).strip().lower() for c in df_nowcast.columns]
+            if "geoid" not in df_nowcast.columns:
+                for alt in ("cell_id","geoid10","geoid_10","id"):
+                    if alt in df_nowcast.columns:
+                        df_nowcast["geoid"] = df_nowcast[alt]; break
+            # zaman alanları
+            if "datetime" in df_nowcast.columns:
+                df_nowcast["datetime"] = pd.to_datetime(df_nowcast["datetime"], errors="coerce")
+                df_nowcast["hour"] = df_nowcast["datetime"].dt.hour
+            elif "date" in df_nowcast.columns and "hour" in df_nowcast.columns:
+                df_nowcast["datetime"] = pd.to_datetime(df_nowcast["date"].astype(str)) + pd.to_timedelta(df_nowcast["hour"].astype(int), unit="h")
+                df_nowcast["hour"] = df_nowcast["hour"].astype(int)
+            elif "hour" in df_nowcast.columns:
+                df_nowcast["hour"] = df_nowcast["hour"].astype(int)
+            # skor sütunu
+            score_col = None
+            for c in ("score","risk_score","prob","p","y_pred","prediction","stacking_prob"):
+                if c in df_nowcast.columns:
+                    score_col = c; break
+            if score_col is None:
+                numeric_cols = [c for c in df_nowcast.columns if pd.api.types.is_numeric_dtype(df_nowcast[c])]
+                score_col = numeric_cols[0] if numeric_cols else None
+            df_nowcast["geoid"] = df_nowcast["geoid"].map(normalize_geoid) if "geoid" in df_nowcast.columns else ""
+
+        # metrikler
+        metrics_name = _find_first_by_patterns(
+            sf_members,
+            patterns=[
+                r"(?:^|/)(stacking|model).*metrics.*\.json$",
+                r"(?:^|/)metrics.*\.json$"
+            ]
+        )
+        if metrics_name:
+            stacking_metrics = read_json_from_artifact(OWNER_MAIN, REPO_MAIN, metrics_name, ARTIFACT_RISK)
+except Exception:
+    df_nowcast = pd.DataFrame()
+    stacking_metrics = {}
 
 # ---------- Veri temizleme ----------
 df_events = ensure_datetime(df_events)
-# GEOID
 if "geoid" in df_events.columns:
     df_events["geoid"] = df_events["geoid"].map(normalize_geoid)
 elif "GEOID" in df_events.columns:
@@ -456,7 +511,6 @@ elif "id" in df_events.columns:
 else:
     df_events["geoid"] = ""
 
-# Kategoriler
 if "category" not in df_events.columns:
     df_events["category"] = "Unknown"
 
@@ -480,6 +534,13 @@ with col2:
 horizon = st.sidebar.select_slider("Horizon (saat)", options=[24, 48, 72, 168], value=24)
 fc_start = st.sidebar.datetime_input("Forecast başlangıcı", value=datetime.combine(max_dt.date(), datetime.min.time()), help="Varsayılan: veri son gününün 00:00")
 
+# Nowcast düzeltmesi ayarları
+st.sidebar.header("Nowcast düzeltmesi")
+use_nowcast = st.sidebar.checkbox("Stacking/nowcast skorlarıyla düzelt", value=True,
+                                  help="Saatlik stacking risk skorları varsa forecast olasılıklarını hafifçe ayarlar.")
+alpha = st.sidebar.slider("Forecast ağırlığı (α)", 0.0, 1.0, 0.7, 0.05,
+                          help="0=yalnız nowcast, 1=yalnız forecast. Öneri: 0.6–0.8")
+
 # Alt filtreler
 if sel_cats:
     df_events = df_events[df_events["category"].isin(sel_cats)]
@@ -497,9 +558,45 @@ if profile.empty:
 # Forecast
 fc = forecast_next_hours(profile, start_dt=fc_start, horizon_h=int(horizon))
 
-# Top-3 özet
+# ---------- Nowcast ile harmanlama ----------
+if use_nowcast and not df_nowcast.empty:
+    tmp = df_nowcast.copy()
+    # kategori alanı var mı?
+    cat_col = next((c for c in ("category","cat","type","crime_category") if c in tmp.columns), None)
+    score_col = next((c for c in ("score","risk_score","prob","p","y_pred","prediction","stacking_prob") if c in tmp.columns), None)
+    if score_col is None:
+        num_cols = [c for c in tmp.columns if pd.api.types.is_numeric_dtype(tmp[c])]
+        score_col = num_cols[0] if num_cols else None
+
+    if score_col:
+        if cat_col is None:
+            # geoid×hour bazlı normalize et (min-max)
+            tmp["nowcast_norm"] = tmp.groupby(["geoid","hour"])[score_col].transform(
+                lambda s: 0.0 if s.max()==s.min() else (s - s.min())/(s.max()-s.min())
+            ).fillna(0.0)
+            fc = fc.merge(tmp[["geoid","hour","nowcast_norm"]].drop_duplicates(), on=["geoid","hour"], how="left")
+            med = 0.0 if fc["nowcast_norm"].isna().all() else fc["nowcast_norm"].median(skipna=True)
+            fc["nowcast_norm"] = fc["nowcast_norm"].fillna(0.0 if np.isnan(med) else med)
+        else:
+            tmp = tmp.rename(columns={cat_col:"category"})
+            tmp["nowcast_norm"] = tmp.groupby(["geoid","category","hour"])[score_col].transform(
+                lambda s: 0.0 if s.max()==s.min() else (s - s.min())/(s.max()-s.min())
+            ).fillna(0.0)
+            fc = fc.merge(tmp[["geoid","category","hour","nowcast_norm"]].drop_duplicates(),
+                          on=["geoid","category","hour"], how="left")
+            med = 0.0 if fc["nowcast_norm"].isna().all() else fc["nowcast_norm"].median(skipna=True)
+            fc["nowcast_norm"] = fc["nowcast_norm"].fillna(0.0 if np.isnan(med) else med)
+        fc["prob_adj"] = alpha*fc["prob"] + (1-alpha)*fc["nowcast_norm"]
+    else:
+        fc["prob_adj"] = fc["prob"]
+else:
+    fc["prob_adj"] = fc["prob"]
+
+# Top-3 özet (ayarlı olasılık ile)
 geoids_in_scope = sel_geoids if sel_geoids else all_geoids
-summary_top3 = summarize_top3(fc, geoid_list=geoids_in_scope)
+fc_for_summary = fc.copy()
+fc_for_summary["prob"] = fc_for_summary["prob_adj"]
+summary_top3 = summarize_top3(fc_for_summary, geoid_list=geoids_in_scope)
 
 # ---------- Harita ----------
 col_map, col_tbl = st.columns([2,1])
@@ -521,6 +618,7 @@ with col_map:
         "html": (
             "<b>GEOID:</b> {display_id}<br/>"
             "<b>Top-3 (pay • saat blokları):</b><br/>{top3_html}"
+            "<br/><i>Nowcast düzeltmesi aktifse: Top-3 payları nowcast ile harmanlanmıştır.</i>"
         ),
         "style": {"backgroundColor":"#262730", "color":"white"},
     }
@@ -541,37 +639,64 @@ with col_tbl:
     else:
         st.info("Top-3 özeti için veri yok.")
 
+st.markdown("----")
+st.subheader("🧪 Stacking Model Metrikleri (sf-artifact)")
+if stacking_metrics:
+    overview_rows = []
+    for k in ("auc","roc_auc","pr_auc","f1","f1_macro","f1_weighted","accuracy","balanced_accuracy"):
+        if k in stacking_metrics:
+            overview_rows.append({"Metric": k, "Value": stacking_metrics[k]})
+    if overview_rows:
+        st.table(pd.DataFrame(overview_rows))
+    by_cat = stacking_metrics.get("by_category") or stacking_metrics.get("per_class") or {}
+    if isinstance(by_cat, dict) and by_cat:
+        cat_rows = []
+        for cat, mm in by_cat.items():
+            if isinstance(mm, dict):
+                cat_rows.append({
+                    "Kategori": cat,
+                    "AUC": mm.get("auc"),
+                    "F1": mm.get("f1"),
+                    "Precision": mm.get("precision"),
+                    "Recall": mm.get("recall")
+                })
+        if cat_rows:
+            st.dataframe(pd.DataFrame(cat_rows), use_container_width=True)
+else:
+    st.info("Stacking metrikleri bulunamadı (artifact içinde *metrics*.json yok veya isimler farklı).")
+
 # ---------- Detay Grafikler ----------
 st.markdown("---")
 st.subheader("Detay: GEOID × Kategori × Saat Profili / Forecast")
 
-# Grafik için seçim
 sel_geo_for_plot = st.multiselect("Grafik için GEOID seçin", options=geoids_in_scope[:1000], default=geoids_in_scope[:1])
 
 if sel_geo_for_plot:
-    # Saat bazlı ısı haritası (kategori×saat)
+    # Saat bazlı ısı haritası (kategori×saat) — nowcast harmanlı
     plot_df = (
-        fc[fc["geoid"].isin(sel_geo_for_plot)]
+        fc_for_summary[fc_for_summary["geoid"].isin(sel_geo_for_plot)]
         .groupby(["category","hour"], as_index=False)["prob"].mean()
     )
     if not plot_df.empty:
         heat = alt.Chart(plot_df).mark_rect().encode(
             x=alt.X("hour:O", title="Saat"),
             y=alt.Y("category:N", title="Kategori"),
-            tooltip=[alt.Tooltip("category", title="Kategori"), alt.Tooltip("hour", title="Saat"), alt.Tooltip("prob", title="Olasılık", format=".3f")],
+            tooltip=[alt.Tooltip("category", title="Kategori"),
+                     alt.Tooltip("hour", title="Saat"),
+                     alt.Tooltip("prob", title="Olasılık", format=".3f")],
             color=alt.Color("prob:Q", title="Olasılık", scale=alt.Scale(scheme="orangered"))
         ).properties(height=320)
         st.altair_chart(heat, use_container_width=True)
 
-    # Top kategoriler için saatlik çizgi
+    # Top kategoriler için saatlik çizgi — nowcast harmanlı
     topk = (
         summary_top3[summary_top3["geoid"].isin(sel_geo_for_plot)]
-        .sort_values(["geoid","rank"]) 
+        .sort_values(["geoid","rank"])
         .groupby("geoid").head(3)[["geoid","category"]].drop_duplicates()
     )
     if not topk.empty:
         lines = (
-            fc.merge(topk, on=["geoid","category"], how="inner")
+            fc_for_summary.merge(topk, on=["geoid","category"], how="inner")
               .groupby(["category","hour"], as_index=False)["prob"].mean()
         )
         line = alt.Chart(lines).mark_line(point=True).encode(
@@ -591,6 +716,10 @@ with st.expander("ℹ️ Metodoloji"):
         **Özet**: Forecast, *son N gün* verisi üzerinden saat-of-day ve gün-of-week paternlerini **zaman yakınlığına göre ağırlıklandırarak** çıkarır. 
         Seçilen horizon (24/48/72/168 saat) boyunca her GEOID×kategori×saat için beklenen olasılık dağılımı hesaplanır. 
         Hover'da gösterilen *Top-3* listesi, bu horizon içindeki toplam olasılık payına göre belirlenir ve her kategori için olasılığın %30'unu taşıyan **pik saat blokları** verilir.
+
+        **Nowcast harmanı**: Eğer artifact'ta saatlik stacking skorları (nowcast) mevcutsa,
+        olasılıklar `prob_adj = α · forecast + (1−α) · nowcast_norm` olarak harmanlanır.
+        α kaydırıcısı ile ayarlanabilir (öneri: 0.6–0.8).
 
         **Parametreler**:
         - *Başlangıç tarihi*: profile dahil edilecek son gün sayısını belirler (ör. 90 gün).
