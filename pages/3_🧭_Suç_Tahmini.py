@@ -1,4 +1,4 @@
-# pages/3_🧭_Suç_Tahmini.py
+# pages/3_🧭_Suç_Tahmini.py (üst kısım — DÜZELTİLMİŞ)
 import io, os, zipfile
 import requests
 import streamlit as st
@@ -21,58 +21,47 @@ except Exception:
 try:
     from components.gh_data import download_actions_artifact_zip  # tercih edilen yol
 except Exception:
-    # ── Yerel fallback: Actions artifact zip indirici
-def _gh_headers(token: str | None) -> dict:
-    h = {"Accept": "application/vnd.github+json"}
-    if token:
-        h["Authorization"] = f"Bearer {token}"
-    return h
+    # ── Yerel fallback: Actions artifact zip indirici ve yardımcıları
+    def _gh_headers(token: str | None) -> dict:
+        h = {"Accept": "application/vnd.github+json"}
+        if token:
+            h["Authorization"] = f"Bearer {token}"
+        return h
 
-def list_actions_artifacts(owner: str, repo: str, token: str | None) -> list[dict]:
-    url = f"https://api.github.com/repos/{owner}/{repo}/actions/artifacts?per_page=100"
-    r = requests.get(url, headers=_gh_headers(token), timeout=30)
-    try:
+    def list_actions_artifacts(owner: str, repo: str, token: str | None) -> list[dict]:
+        url = f"https://api.github.com/repos/{owner}/{repo}/actions/artifacts?per_page=100"
+        r = requests.get(url, headers=_gh_headers(token), timeout=30)
         r.raise_for_status()
-    except Exception as e:
-        # Teşhis için ham cevaptan kısa bir parça göster
-        st.error(f"[Artifacts LIST] HTTP {r.status_code} — {r.text[:300]}")
-        raise
-    data = r.json() if r.headers.get("content-type","").startswith("application/json") else {}
-    return data.get("artifacts", [])
+        data = r.json() if r.headers.get("content-type","").startswith("application/json") else {}
+        return data.get("artifacts", [])
 
-def download_actions_artifact_zip(owner: str, repo: str, artifact_name: str, token: str | None) -> bytes:
-    # Önce listele ve ekranda göster (debug)
-    arts = list_actions_artifacts(owner, repo, token)
-    if not arts:
-        raise FileNotFoundError("Repo’da hiç artifact bulunamadı (liste boş).")
+    def download_actions_artifact_zip(owner: str, repo: str, artifact_name: str, token: str | None) -> bytes:
+        arts = list_actions_artifacts(owner, repo, token)
+        if not arts:
+            raise FileNotFoundError("Repo’da hiç artifact bulunamadı (liste boş).")
 
-    # Ekranda kısa özet
-    st.caption("🔎 Bulunan artifact’ler (ilk 10): " + ", ".join(
-        [f"{a.get('name')}@{a.get('updated_at','?')}" for a in arts[:10]]
-    ))
+        # (İsterseniz debug için gösterin)
+        st.caption("🔎 Bulunan artifact’ler (ilk 10): " + ", ".join(
+            [f"{a.get('name')}@{a.get('updated_at','?')}" for a in arts[:10]]
+        ))
 
-    candidates = [a for a in arts if a.get("name") == artifact_name and not a.get("expired", False)]
-    if not candidates:
-        # Yakın isimler için öneri ver
-        close = [a.get("name") for a in arts if artifact_name.lower().replace("-", "").replace("_","") in str(a.get("name","")).lower().replace("-", "").replace("_","")]
-        msg = f"Artifact bulunamadı: '{artifact_name}'."
-        if close:
-            msg += f" Benzerler: {', '.join(close[:5])}"
-        raise FileNotFoundError(msg)
+        candidates = [a for a in arts if a.get("name") == artifact_name and not a.get("expired", False)]
+        if not candidates:
+            close = [a.get("name") for a in arts if artifact_name.lower().replace("-", "").replace("_","")
+                     in str(a.get("name","")).lower().replace("-", "").replace("_","")]
+            msg = f"Artifact bulunamadı: '{artifact_name}'."
+            if close:
+                msg += f" Benzerler: {', '.join(close[:5])}"
+            raise FileNotFoundError(msg)
 
-    candidates.sort(key=lambda x: x.get("updated_at",""), reverse=True)
-    url = candidates[0].get("archive_download_url")
-    if not url:
-        raise RuntimeError("archive_download_url alanı yok (artifact expire olmuş olabilir).")
+        candidates.sort(key=lambda x: x.get("updated_at",""), reverse=True)
+        url = candidates[0].get("archive_download_url")
+        if not url:
+            raise RuntimeError("archive_download_url alanı yok (artifact expire olmuş olabilir).")
 
-    r = requests.get(url, headers=_gh_headers(token), timeout=60)
-    try:
+        r = requests.get(url, headers=_gh_headers(token), timeout=60)
         r.raise_for_status()
-    except Exception:
-        st.error(f"[Artifact GET] HTTP {r.status_code} — {r.text[:300]}")
-        raise
-    return r.content
-
+        return r.content
 
 # ── 1) Yardımcılar
 def _resolve_token() -> str | None:
