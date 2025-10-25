@@ -306,7 +306,7 @@ sel_date = st.sidebar.selectbox("Gün seçin", dates, index=len(dates) - 1, form
 one_day = classify_quantiles(risk_daily, sel_date) if sel_date else pd.DataFrame()
 
 if not one_day.empty:
-    st.metric(
+    st.metric()
     gj = fetch_geojson_smart(GEOJSON_PATH_LOCAL_DEFAULT, GEOJSON_PATH_LOCAL_DEFAULT, RAW_GEOJSON_OWNER, RAW_GEOJSON_REPO)
     enriched = inject_properties(gj, one_day)
     make_map(enriched)
