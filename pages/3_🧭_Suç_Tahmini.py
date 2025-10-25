@@ -1,4 +1,5 @@
 # 3_🧭_Suç_Tahmini.py
+import io, zipfile
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -6,13 +7,13 @@ import folium
 from streamlit_folium import st_folium
 from datetime import datetime
 
+# --- Güvenli import (hata ekranı ile) ---
 for name, stmt in [
     ("components.config", "from components.config import APP_NAME, APP_ROLE, DATA_REPO, DATA_BRANCH, GH_TOKEN"),
-    ("components.gh_data", "from components.gh_data import raw_url, download_actions_artifact_zip, unzip"),
+    ("components.gh_data", "from components.gh_data import download_actions_artifact_zip"),
     ("streamlit", "import streamlit as st"),
     ("pandas", "import pandas as pd"),
     ("numpy", "import numpy as np"),
-    ("requests", "import requests"),
     ("folium", "import folium"),
     ("streamlit_folium", "from streamlit_folium import st_folium"),
 ]:
@@ -23,90 +24,111 @@ for name, stmt in [
         st.error(f"Import hatası: {name} → {type(e).__name__}: {e}")
         st.stop()
 
-# --- 1) Veri yükleme ---
-# Kaynaklar:
-# - Suç verisi: cem5113/crime_prediction_data/artifact/fr-crime-pipeline-output.zip → fr_crime_09.csv
-# - Stacking metrikleri: cem5113/crime_prediction_data/artifact/sf-crime-pipeline-output.zip → metrics_stacking_ohe.csv
+# ──────────────────────────────────────────────────────────────────────────────
+# 1) Artifact'ten PARQUET/PAQUET okuma
+# ──────────────────────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=True)
+def _read_parquet_from_zip(zip_bytes: bytes, candidate_names: list[str]) -> pd.DataFrame:
+    """
+    GitHub Actions artifact zip baytlarından, verilen son-ad eşleşmelerine göre
+    ilk uygun PARQUET/PAQUET dosyasını bulup DataFrame döndürür.
+    Eşleşme: önce tam uçtan (case-insensitive), sonra kısmi içerir eşleşmesi.
+    """
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        names = zf.namelist()
+
+        # 1) Tam uçtan eşleşme (case-insensitive)
+        low_names = [n.lower() for n in names]
+        for cand in candidate_names:
+            c = cand.lower()
+            for i, ln in enumerate(low_names):
+                if ln.endswith(c):
+                    with zf.open(names[i]) as f:
+                        return pd.read_parquet(f)
+
+        # 2) Kısmi içerir eşleşmesi
+        bases = [cand.split("/")[-1].lower() for cand in candidate_names]
+        for i, ln in enumerate(low_names):
+            if any(b in ln for b in bases):
+                with zf.open(names[i]) as f:
+                    return pd.read_parquet(f)
+
+        # Bulunamadı
+        raise FileNotFoundError(
+            "ZIP içinde beklenen PARQUET/PAQUET bulunamadı.\n"
+            f"Aranan: {candidate_names}\n"
+            f"Örnek içerik: {names[:30]}"
+        )
 
 @st.cache_data(show_spinner=False)
 def load_data():
-    """Veriyi sağlam şekilde yükler. Önce raw CSV, olmazsa ZIP (repo/raw veya releases).
-    Hata durumunda ZIP içeriğini listeleyip ekranın altına yazdırır (debug için)."""
-    import io, zipfile, requests
-
-    # Opsiyonel: components.config varsa, oradan repo/branch al
+    """
+    - fr-crime-pipeline-output → fr_crime_09.parquet (veya .paquet)
+    - sf-crime-parquet        → metrics_stacking_ohe.parquet (veya .paquet)
+    """
+    # config
     try:
-        from components.config import DATA_REPO, DATA_BRANCH
-        RAW_BASE = f"https://raw.githubusercontent.com/{DATA_REPO}/{DATA_BRANCH}"
+        from components.config import DATA_REPO, GH_TOKEN
     except Exception:
-        RAW_BASE = "https://raw.githubusercontent.com/cem5113/crime_prediction_data/main"
+        st.error("components.config içinden DATA_REPO / GH_TOKEN okunamadı.")
+        st.stop()
 
-    RAW_FR_CSV = f"{RAW_BASE}/artifact/fr-crime-pipeline-output/fr_crime_09.csv"
-    RAW_METRICS_CSV = f"{RAW_BASE}/artifact/sf-crime-pipeline-output/metrics_stacking_ohe.csv"
+    try:
+        owner, repo = DATA_REPO.split("/", 1)
+    except ValueError:
+        st.error(f"DATA_REPO beklenen formatta değil: {DATA_REPO} (örn. cem5113/crime_prediction_data)")
+        st.stop()
 
-    ZIP_FR_RAW = f"{RAW_BASE}/artifact/fr-crime-pipeline-output.zip"
-    ZIP_SF_RAW = f"{RAW_BASE}/artifact/sf-crime-pipeline-output.zip"
+    if not GH_TOKEN:
+        st.error("GH_TOKEN gerekli. components.config içinde GH_TOKEN tanımlayın.")
+        st.stop()
 
-    # Releases ZIP dosyaları (asset olarak yüklenmişse)
-    REL_BASE = "https://github.com/cem5113/crime_prediction_data/releases/latest/download"
-    ZIP_FR_REL = f"{REL_BASE}/fr-crime-pipeline-output.zip"
-    ZIP_SF_REL = f"{REL_BASE}/sf-crime-pipeline-output.zip"
+    # 1) FR verisi — fr-crime-pipeline-output
+    fr_zip = download_actions_artifact_zip(
+        owner=owner,
+        repo=repo,
+        artifact_name="fr-crime-pipeline-output",
+        token=GH_TOKEN,
+    )
+    df_fr = _read_parquet_from_zip(
+        fr_zip,
+        candidate_names=[
+            "fr_crime_09.parquet",
+            "fr-crime_09.parquet",
+            "fr_crime_09.paquet",
+            "fr-crime_09.paquet",
+        ],
+    )
 
-    def _pick_member(zf: zipfile.ZipFile, wanted_name_endswith: str) -> str | None:
-        names = zf.namelist()
-        # 1) Tam uçtan eşleşme
-        for n in names:
-            if n.endswith(wanted_name_endswith):
-                return n
-        # 2) Küçük harf, kısmi ad (ör. fr_crime_09)
-        base = wanted_name_endswith.rsplit(".", 1)[0].lower()
-        for n in names:
-            if base in n.lower():
-                return n
-        return None
+    # 2) Stacking metrikleri — sf-crime-parquet
+    sf_zip = download_actions_artifact_zip(
+        owner=owner,
+        repo=repo,
+        artifact_name="sf-crime-parquet",
+        token=GH_TOKEN,
+    )
+    metrics = _read_parquet_from_zip(
+        sf_zip,
+        candidate_names=[
+            "metrics_stacking_ohe.parquet",
+            "metrics_stacking.parquet",
+            "metrics_stacking_ohe.paquet",
+            "metrics_stacking.paquet",
+        ],
+    )
 
-    def _read_csv_or_from_zip(primary_csv_url: str, fallback_zips: list[str], wanted_name_endswith: str) -> pd.DataFrame:
-        # 1) doğrudan CSV dene
-        try:
-            return pd.read_csv(primary_csv_url)
-        except Exception as e_csv:
-            st.caption(f"CSV denemesi başarısız: {primary_csv_url} — {e_csv}")
-        # 2) ZIP'lerden sırayla dene
-        last_err = None
-        for url in fallback_zips:
-            try:
-                r = requests.get(url, timeout=60)
-                r.raise_for_status()
-                with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
-                    member = _pick_member(zf, wanted_name_endswith)
-                    if member is None:
-                        st.warning("ZIP içinde beklenen dosya bulunamadı. İçerik listesi aşağıda.")
-                        st.text("\n".join(zf.namelist()[:50]))
-                        continue
-                    with zf.open(member) as f:
-                        st.caption(f"ZIP içinden yüklendi: {url.split('/')[-1]} → {member}")
-                        return pd.read_csv(f)
-            except Exception as e_zip:
-                last_err = e_zip
-                st.caption(f"ZIP denemesi başarısız: {url} — {e_zip}")
-                continue
-        raise FileNotFoundError(f"{wanted_name_endswith} indirilemedi veya ZIP içinde bulunamadı. Son hata: {last_err}")
-
-    df = _read_csv_or_from_zip(RAW_FR_CSV, [ZIP_FR_RAW, ZIP_FR_REL], "fr_crime_09.csv")
-    metrics = _read_csv_or_from_zip(RAW_METRICS_CSV, [ZIP_SF_RAW, ZIP_SF_REL], "metrics_stacking_ohe.csv")
-
-    return df, metrics
-
+    return df_fr, metrics
 
 df, metrics = load_data()
 
-# --- 2) Yardımcılar ---
-
+# ──────────────────────────────────────────────────────────────────────────────
+# 2) Yardımcılar
+# ──────────────────────────────────────────────────────────────────────────────
 def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Sütun adları farklı varyantlarla gelirse, standart alias kolonlar oluştur.
+    """
+    Sütun adları farklı varyantlarla gelirse, standart alias kolonlar oluştur.
     Beklenen: GEOID, Category, hour, latitude, longitude, risk_score, date/datetime
     """
-    cols = {c: c for c in df.columns}
     lower = {c.lower(): c for c in df.columns}
 
     def alias(src_opts: list[str], target: str):
@@ -120,9 +142,8 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
                 if target not in df.columns:
                     df[target] = df[orig]
                 return
-        # yoksa dokunma
 
-    alias(["GEOID", "geoid", "Geoid", "id"], "GEOID")
+    alias(["GEOID", "geoid", "Geoid", "id", "cell_id"], "GEOID")
     alias(["Category", "category", "crime_category"], "Category")
     alias(["Subcategory", "subcategory", "crime_subcategory"], "Subcategory")
     alias(["hour", "event_hour", "event_hour_x", "event_hour_y"], "hour")
@@ -141,7 +162,6 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     # risk_score yoksa basit yedek skor üret (kalibre değil)
     if "risk_score" not in df.columns:
-        # bulunabilirse basit normalize kombine skor
         parts = []
         for c in ["neighbor_crime_24h", "911_request_count_hour_range", "crime_count", "daily_cnt"]:
             if c in df.columns:
@@ -153,14 +173,17 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
             df["risk_score"] = 0.5  # düz sabit
     return df
 
-
 df = ensure_columns(df)
 
-# --- 3) Başlık ---
+# ──────────────────────────────────────────────────────────────────────────────
+# 3) Başlık
+# ──────────────────────────────────────────────────────────────────────────────
 st.title("🔎 Suç Tahmin Modülü (Yalnız Kolluğa Yararlı)")
 st.markdown("Zaman, mekân ve kategori bazlı risk tahminleri — yalnız kolluk için anlamlı sonuçlar gösterilir.")
 
-# --- 4) Filtreler ---
+# ──────────────────────────────────────────────────────────────────────────────
+# 4) Filtreler
+# ──────────────────────────────────────────────────────────────────────────────
 col1, col2, col3 = st.columns(3)
 with col1:
     default_date = None
@@ -190,7 +213,9 @@ with col3:
 
 show_only_relevant = st.toggle("🔒 Yalnız kolluğa yararlı sonuçları göster", value=True)
 
-# --- 5) Tarih filtresi ---
+# ──────────────────────────────────────────────────────────────────────────────
+# 5) Tarih filtresi
+# ──────────────────────────────────────────────────────────────────────────────
 mask = pd.Series(True, index=df.index)
 if date_selected is not None:
     if "date" in df.columns:
@@ -206,7 +231,9 @@ if date_selected is not None:
 
 view = df[mask].copy() if mask.any() else df.copy()
 
-# --- 6) Risk eşiği ve diğer filtreler ---
+# ──────────────────────────────────────────────────────────────────────────────
+# 6) Risk eşiği ve diğer filtreler
+# ──────────────────────────────────────────────────────────────────────────────
 if "risk_score" in view.columns:
     q75 = view["risk_score"].quantile(0.75)
 else:
@@ -225,7 +252,9 @@ if view.empty:
     st.info("Eşiklere veya filtrelere göre gösterilecek kritik nokta yok.")
     st.stop()
 
-# --- 7) Harita ---
+# ──────────────────────────────────────────────────────────────────────────────
+# 7) Harita
+# ──────────────────────────────────────────────────────────────────────────────
 center = [float(view["latitude"].mean()), float(view["longitude"].mean())] if {"latitude","longitude"}.issubset(view.columns) else [37.77, -122.42]
 m = folium.Map(location=center, zoom_start=12, tiles="CartoDB positron")
 
@@ -253,16 +282,22 @@ if {"latitude","longitude"}.issubset(view.columns):
 
 st_folium(m, width=800, height=560)
 
-# --- 8) Tablo ---
+# ──────────────────────────────────────────────────────────────────────────────
+# 8) Tablo
+# ──────────────────────────────────────────────────────────────────────────────
 st.subheader("📊 Yüksek Riskli Noktalar")
 cols_to_show = [c for c in ["GEOID","hour","Category","risk_score","latitude","longitude"] if c in view.columns]
 st.dataframe(view[cols_to_show].sort_values(by="risk_score", ascending=False).head(50), use_container_width=True)
 
-# --- 9) Stacking metrikleri ---
+# ──────────────────────────────────────────────────────────────────────────────
+# 9) Stacking metrikleri
+# ──────────────────────────────────────────────────────────────────────────────
 st.subheader("📈 Model Performans Özeti (Stacking)")
 st.dataframe(metrics, use_container_width=True)
 
-# --- 10) Export ---
+# ──────────────────────────────────────────────────────────────────────────────
+# 10) Export
+# ──────────────────────────────────────────────────────────────────────────────
 st.download_button(
     "⬇️ Hotspot verisini indir (CSV)",
     view.to_csv(index=False).encode("utf-8"),
