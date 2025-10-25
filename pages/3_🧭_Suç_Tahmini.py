@@ -640,12 +640,14 @@ today_date = datetime.utcnow().date()
 safe_min_date = (min_dt_raw.date() if pd.notna(min_dt_raw) else today_date)
 safe_max_date = (max_dt_raw.date() if pd.notna(max_dt_raw) else today_date)
 
+# Uç durum: min > max ise takas et
+if safe_min_date > safe_max_date:
+    safe_min_date, safe_max_date = safe_max_date, safe_min_date
+
 # --- Tarih girişleri ---
 col1, col2 = st.sidebar.columns(2)
 with col1:
-    default_start_date = safe_max_date - timedelta(days=90)
-    if default_start_date < safe_min_date:
-        default_start_date = safe_min_date
+    default_start_date = max(safe_min_date, safe_max_date - timedelta(days=90))
     start_date = st.date_input(
         "Başlangıç tarihi (profil için)",
         value=default_start_date,
@@ -666,7 +668,8 @@ fc_start_default = datetime.combine(safe_max_date, datetime.min.time())
 fc_start = st.sidebar.datetime_input(
     "Forecast başlangıcı",
     value=fc_start_default,
-    help="Varsayılan: veri son gününün 00:00"
+    help="Varsayılan: veri son gününün 00:00",
+    key="fc_start_widget"
 )
 
 # Nowcast düzeltmesi ayarları
