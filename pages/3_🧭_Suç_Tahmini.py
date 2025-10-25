@@ -677,21 +677,30 @@ if fc_start_default < min_dt_bound:
 elif fc_start_default > max_dt_bound:
     fc_start_default = max_dt_bound
 
-# Benzersiz key ve açık min/max ile widget
-fc_start = st.sidebar.datetime_input(
-    "Forecast başlangıcı",
-    value=fc_start_default,
-    min_value=min_dt_bound,
-    max_value=max_dt_bound,
-    help="Varsayılan: veri son gününün 00:00",
-    key="fc_start_widget_v2"
+fc_date = st.sidebar.date_input(
+    "Forecast tarihi",
+    value=fc_start_default.date(),
+    min_value=safe_min_date,
+    max_value=safe_max_date,
+    key="fc_date_widget"
 )
 
-# Streamlit bazen pandas.Timestamp döndürebilir; Python datetime'a zorla
-try:
-    fc_start = pd.to_datetime(fc_start).to_pydatetime()
-except Exception:
-    fc_start = fc_start_default
+# Saat parçası (Streamlit time_input min/max desteklemiyor; gerekirse kıskaç uygularız)
+fc_time = st.sidebar.time_input(
+    "Forecast saati",
+    value=fc_start_default.time().replace(microsecond=0),
+    step=3600,  # saatlik adım
+    key="fc_time_widget"
+)
+
+# Birleştir
+fc_start = datetime.combine(fc_date, fc_time)
+
+# Güvenlik: min/max sınırına kıskaç (clamp)
+if fc_start < min_dt_bound:
+    fc_start = min_dt_bound
+elif fc_start > max_dt_bound:
+    fc_start = max_dt_bound
 
 # Nowcast düzeltmesi ayarları
 st.sidebar.header("Nowcast düzeltmesi")
