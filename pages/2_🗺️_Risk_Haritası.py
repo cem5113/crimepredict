@@ -309,8 +309,7 @@ if not one_day.empty:
     c1, c2, c3 = st.columns(3)
     c1.metric("Alan sayısı", f"{one_day['geoid'].nunique():,}")
     c2.metric("Tarih", str(sel_date))
-    c3.metric("Çeyrekler", f"Q25={one_day['q25'].iloc[0]:.4f} | Q50={one_day['q50'].iloc[0]:.4f} | Q75={one_day['q75'].iloc[0]:.4f}")
-
+    c3.metric("Dağılım", f"Yüksek riskli: {one_day['risk_level'].value_counts(normalize=True).get('critical',0)*100:.1f}% | Riskli: {one_day['risk_level'].value_counts(normalize=True).get('high',0)*100:.1f}% | Orta riskli: {one_day['risk_level'].value_counts(normalize=True).get('medium',0)*100:.1f}% | Düşük riskli: {one_day['risk_level'].value_counts(normalize=True).get('low',0)*100:.1f}%")
     gj = fetch_geojson_smart(GEOJSON_PATH_LOCAL_DEFAULT, GEOJSON_PATH_LOCAL_DEFAULT, RAW_GEOJSON_OWNER, RAW_GEOJSON_REPO)
     enriched = inject_properties(gj, one_day)
     make_map(enriched)
