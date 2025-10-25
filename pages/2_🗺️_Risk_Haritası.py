@@ -229,7 +229,7 @@ def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
             enriched += 1
 
         if lvl is None:
-            lvl = props.get("risk_level", "çok düşük riskli")
+            lvl = props.get("risk_level", "zero")
         props["risk_level"] = lvl
         props["fill_color"] = COLOR_MAP.get(lvl, [220, 220, 220])
 
