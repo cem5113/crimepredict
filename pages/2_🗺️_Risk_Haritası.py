@@ -6,7 +6,7 @@ import streamlit as st
 import pydeck as pdk
 import requests
 from components.last_update import show_last_update_badge
-from components.utils import MODEL_VERSION, MODEL_LAST_TRAIN
+from components.meta import MODEL_VERSION, MODEL_LAST_TRAIN
 
 st.set_page_config(page_title="🗺️ Risk Haritası (Günlük)", layout="wide")
 st.title("Suç Risk Haritası — Günlük Ortalama (low / medium / high / critical)")
