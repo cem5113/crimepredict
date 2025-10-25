@@ -1,8 +1,9 @@
 # app.py — SUTAM (revize tam sürüm)
 import streamlit as st
+
+from components.config import APP_NAME, APP_ROLE, DATA_REPO, DATA_BRANCH
 from components.last_update import show_last_update_badge
 from components.utils import MODEL_VERSION, MODEL_LAST_TRAIN
-from components.config import APP_NAME, APP_ROLE, DATA_REPO, DATA_BRANCH
 from components.gh_data import raw_url, download_actions_artifact_zip, unzip
 
 st.set_page_config(page_title=APP_NAME, layout="wide")
