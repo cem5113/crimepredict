@@ -1,7 +1,7 @@
 # pages/1_🏠_Ana_Sayfa.py
 import streamlit as st
 from components.last_update import show_last_update_badge
-from components.utils import MODEL_VERSION, MODEL_LAST_TRAIN
+from components.meta import MODEL_VERSION, MODEL_LAST_TRAIN
 
 st.set_page_config(page_title="🏠 Ana Sayfa", layout="wide")
 
