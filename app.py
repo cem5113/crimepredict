@@ -8,7 +8,7 @@ import streamlit as st
 # ── Proje bileşenleri
 from components.config import APP_NAME, APP_ROLE, DATA_REPO, DATA_BRANCH
 from components.last_update import show_last_update_badge
-from components.utils import MODEL_VERSION, MODEL_LAST_TRAIN
+from components.meta import MODEL_VERSION, MODEL_LAST_TRAIN
 from components.gh_data import raw_url, download_actions_artifact_zip, unzip
 
 # ── Sayfa ayarları
