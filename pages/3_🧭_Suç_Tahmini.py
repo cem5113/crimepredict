@@ -5,6 +5,23 @@ import folium
 from streamlit_folium import st_folium
 from datetime import datetime
 
+for name, stmt in [
+    ("components.config", "from components.config import APP_NAME, APP_ROLE, DATA_REPO, DATA_BRANCH, GH_TOKEN"),
+    ("components.gh_data", "from components.gh_data import raw_url, download_actions_artifact_zip, unzip"),
+    ("streamlit", "import streamlit as st"),
+    ("pandas", "import pandas as pd"),
+    ("numpy", "import numpy as np"),
+    ("requests", "import requests"),
+    ("folium", "import folium"),
+    ("streamlit_folium", "from streamlit_folium import st_folium"),
+]:
+    try:
+        exec(stmt, {})
+    except Exception as e:
+        import streamlit as st
+        st.error(f"Import hatası: {name} → {type(e).__name__}: {e}")
+        st.stop()
+
 # --- 1) Veri yükleme ---
 # Kaynaklar:
 # - Suç verisi: cem5113/crime_prediction_data/artifact/fr-crime-pipeline-output.zip → fr_crime_09.csv
@@ -63,8 +80,7 @@ def load_data():
                     member = _pick_member(zf, wanted_name_endswith)
                     if member is None:
                         st.warning("ZIP içinde beklenen dosya bulunamadı. İçerik listesi aşağıda.")
-                        st.text("
-".join(zf.namelist()[:50]))
+                        st.text("\n".join(zf.namelist()[:50]))
                         continue
                     with zf.open(member) as f:
                         st.caption(f"ZIP içinden yüklendi: {url.split('/')[-1]} → {member}")
