@@ -4,7 +4,7 @@
 # saatlik pattern çıkarır, basit fakat açıklanabilir bir forecast üretir ve
 # harita üzerinde (hover) her hücre için en olası 3 suç türü ve en olası zaman aralıklarını gösterir.
 # Veri kaynakları GitHub Actions artifact'larından okunur:
-#  - fr-crime-pipeline-output: fr_crime_09.parquet  (geçmiş olay+özellikler)
+#  - fr-crime-outputs-parquet: fr_crime_10.parquet  (geçmiş olay+özellikler)
 #  - crime_prediction_data / sf-crime-parquet: risk_hourly.parquet ve/veya stacking nowcast/parquet (opsiyonel)
 #
 # Not: Bu forecast, kolluk için yalın ve hızlı çalışacak şekilde tasarlandı:
@@ -47,8 +47,8 @@ EXPECTED_RISK_PARQUET = "risk_hourly.parquet"  # opsiyonel
 
 OWNER_FR = cfg.get("fr_owner", OWNER_MAIN)
 REPO_FR = cfg.get("fr_repo", REPO_MAIN)  # ✅ FR artifact bu repoda üretildiği için
-ARTIFACT_FR = cfg.get("fr_artifact", "fr-crime-pipeline-output")
-EXPECTED_FR_PARQUET = cfg.get("fr_file", "fr_crime_09.parquet")
+ARTIFACT_FR = cfg.get("fr_artifact", "fr-crime-outputs-parquet")
+EXPECTED_FR_PARQUET = cfg.get("fr_file", "fr_crime_10.parquet")
 
 # GeoJSON
 GEOJSON_PATH_LOCAL_DEFAULT = cfg.get("geojson_path", "data/sf_cells.geojson")
@@ -401,7 +401,7 @@ if not TOKEN:
 try:
     df_events = read_parquet_from_artifact(OWNER_FR, REPO_FR, EXPECTED_FR_PARQUET, ARTIFACT_FR)
 except Exception as e:
-    st.error(f"Olay verisi (fr_crime_09.parquet) okunamadı: {e}")
+    st.error(f"Olay verisi ({EXPECTED_FR_PARQUET}) okunamadı: {e}")
     st.stop()
 
 # Opsiyonel risk dosyası (genel renk için)
