@@ -5,6 +5,12 @@ import folium
 from streamlit_folium import st_folium
 from datetime import datetime
 
+# Eğer components/config.py yoksa, aşağıdaki değerleri burada sabitle:
+APP_NAME = "Crime Prediction Dashboard"
+APP_ROLE = "Kolluk Kuvvetleri için Suç Tahmini"
+DATA_REPO = "cem5113/crime_prediction_data"
+DATA_BRANCH = "main"
+
 # --- 1) Veri yükleme ---
 # Kaynaklar:
 # - Suç verisi: cem5113/crime_prediction_data/artifact/fr-crime-pipeline-output.zip → fr_crime_09.csv
