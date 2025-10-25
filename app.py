@@ -9,9 +9,13 @@ import streamlit as st
 from components.last_update import show_last_update_badge
 from components.meta import MODEL_VERSION, MODEL_LAST_TRAIN
 from components.gh_data import raw_url, download_actions_artifact_zip, unzip
+from components.config import APP_NAME, APP_ROLE, DATA_REPO, DATA_BRANCH
 
 # ── Sayfa ayarları
 st.set_page_config(page_title=APP_NAME, layout="wide")
+st.set_page_config(page_title=APP_NAME, layout="wide")
+st.title(APP_NAME)
+st.caption(f"Rol: {APP_ROLE}")
 
 # ── Yardımcı: GitHub token çözümleyici
 def resolve_and_set_github_token() -> str | None:
