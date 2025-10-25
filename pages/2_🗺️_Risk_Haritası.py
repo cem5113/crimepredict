@@ -310,7 +310,7 @@ if not one_day.empty:
         </div>
     
         <div style="font-size:13px; font-style:italic; color:#666; margin-top:8px;">
-            Şehir alanları, günlük risk skorlarına göre <b>dört seviyeye</b> ayrılmıştır.<br> Bu sınıflandırma, alanları dört risk seviyesine ayırmak için belirlenen sabit eşiklere dayanmaktadır.
+            Bu sınıflandırma, alanları dört risk seviyesine ayırmak için belirlenen günlük risk skorlarından elde edilen sabit eşiklere dayanmaktadır.
         </div>
         """,
         unsafe_allow_html=True
