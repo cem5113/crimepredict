@@ -7,95 +7,76 @@ import numpy as np
 import folium
 from streamlit_folium import st_folium
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 0) Config & Token çözümleme (harici modüle bağımlı değil)
-# ──────────────────────────────────────────────────────────────────────────────
-def resolve_repo_and_token():
-    owner_repo = None
-    token = None
+# ── 0) Normal import + güvenli fallback
+try:
+    from components.config import APP_NAME, APP_ROLE, DATA_REPO, DATA_BRANCH, GH_TOKEN
+except Exception:
+    # minimum fallback: sadece DATA_REPO/GH_TOKEN gerekli
+    APP_NAME = "CrimePredict"
+    APP_ROLE = "analysis"
+    DATA_REPO = os.getenv("DATA_REPO", "cem5113/crime_prediction_data")
+    DATA_BRANCH = os.getenv("DATA_BRANCH", "main")
+    GH_TOKEN = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN")
 
-    # 1) components.config
+try:
+    from components.gh_data import download_actions_artifact_zip  # tercih edilen yol
+except Exception:
+    # ── Yerel fallback: Actions artifact zip indirici
+    def _gh_headers(token: str | None) -> dict:
+        h = {"Accept": "application/vnd.github+json"}
+        if token:
+            h["Authorization"] = f"Bearer {token}"
+        return h
+
+    def download_actions_artifact_zip(owner: str, repo: str, artifact_name: str, token: str | None) -> bytes:
+        base = f"https://api.github.com/repos/{owner}/{repo}/actions/artifacts"
+        r = requests.get(base, headers=_gh_headers(token), timeout=30)
+        r.raise_for_status()
+        items = r.json().get("artifacts", [])
+        cand = [a for a in items if a.get("name") == artifact_name and not a.get("expired", False)]
+        if not cand:
+            raise FileNotFoundError(f"Artifact bulunamadı: {artifact_name}")
+        cand.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+        url = cand[0].get("archive_download_url")
+        if not url:
+            raise RuntimeError("archive_download_url bulunamadı")
+        r2 = requests.get(url, headers=_gh_headers(token), timeout=60)
+        r2.raise_for_status()
+        return r2.content
+
+# ── 1) Yardımcılar
+def _resolve_token() -> str | None:
+    # 1) config
+    if GH_TOKEN:
+        return GH_TOKEN
+    # 2) secrets
     try:
-        from components.config import DATA_REPO, GH_TOKEN
-        owner_repo = DATA_REPO
-        token = GH_TOKEN
+        for k in ("GH_TOKEN", "github_token", "GITHUB_TOKEN"):
+            if k in st.secrets and st.secrets[k]:
+                return str(st.secrets[k])
     except Exception:
         pass
-
-    # 2) secrets
-    if not token:
-        for k in ("GH_TOKEN", "github_token", "GITHUB_TOKEN"):
-            try:
-                if k in st.secrets and st.secrets[k]:
-                    token = str(st.secrets[k])
-                    break
-            except Exception:
-                pass
-
     # 3) env
-    if not token:
-        token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN") or os.getenv("github_token")
-
-    # 4) owner/repo yoksa fallback
-    if not owner_repo:
-        # İstediğin repo'yu buraya yazabilirsin:
-        owner_repo = "cem5113/crime_prediction_data"
-
-    # doğrula
-    if "/" not in owner_repo:
-        st.error(f"DATA_REPO beklenen formatta değil: {owner_repo} (örn. cem5113/crime_prediction_data)")
-        st.stop()
-    return owner_repo, token
-
-def gh_headers(token: str | None) -> dict:
-    h = {"Accept": "application/vnd.github+json"}
-    if token:
-        h["Authorization"] = f"Bearer {token}"
-    return h
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 1) Actions artifact'ten ZIP indirme (yerel implementasyon)
-# ──────────────────────────────────────────────────────────────────────────────
-def download_actions_artifact_zip(owner: str, repo: str, artifact_name: str, token: str | None) -> bytes:
-    """
-    En güncel, süresi dolmamış artifact'i bulur ve ZIP baytlarını döndürür.
-    """
-    base = f"https://api.github.com/repos/{owner}/{repo}/actions/artifacts"
-    r = requests.get(base, headers=gh_headers(token), timeout=30)
-    r.raise_for_status()
-    items = r.json().get("artifacts", [])
-    cand = [a for a in items if a.get("name") == artifact_name and not a.get("expired", False)]
-    if not cand:
-        raise FileNotFoundError(f"Artifact bulunamadı: {artifact_name}")
-    cand.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
-    url = cand[0].get("archive_download_url")
-    if not url:
-        raise RuntimeError("archive_download_url bulunamadı")
-    r2 = requests.get(url, headers=gh_headers(token), timeout=60)
-    r2.raise_for_status()
-    return r2.content
+    return os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN") or os.getenv("github_token")
 
 @st.cache_data(show_spinner=True)
 def _read_parquet_from_zip(zip_bytes: bytes, candidate_names: list[str]) -> pd.DataFrame:
-    """
-    ZIP içinden .parquet/.paquet dosyayı bulup okur.
-    Önce tam uçtan (case-insensitive), sonra kısmi içerir eşleşmesi.
-    """
+    """ZIP içinden .parquet/.paquet dosyayı bulup okur (case-insensitive, uçtan ve kısmi eşleşme)."""
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         names = zf.namelist()
-        low_names = [n.lower() for n in names]
+        low = [n.lower() for n in names]
 
-        # 1) Tam uçtan eşleşme
+        # 1) tam uçtan
         for cand in candidate_names:
             c = cand.lower()
-            for i, ln in enumerate(low_names):
+            for i, ln in enumerate(low):
                 if ln.endswith(c):
                     with zf.open(names[i]) as f:
                         return pd.read_parquet(f)
 
-        # 2) Kısmi içerir eşleşmesi
+        # 2) kısmi
         bases = [cand.split("/")[-1].lower() for cand in candidate_names]
-        for i, ln in enumerate(low_names):
+        for i, ln in enumerate(low):
             if any(b in ln for b in bases):
                 with zf.open(names[i]) as f:
                     return pd.read_parquet(f)
@@ -112,58 +93,46 @@ def load_data():
     - fr-crime-pipeline-output → fr_crime_09.parquet (veya .paquet)
     - sf-crime-parquet        → metrics_stacking_ohe.parquet (veya .paquet)
     """
-    owner_repo, token = resolve_repo_and_token()
-    owner, repo = owner_repo.split("/", 1)
-
+    token = _resolve_token()
     if not token:
-        st.error("GitHub token bulunamadı. `components.config.GH_TOKEN`, `st.secrets`, ya da `GITHUB_TOKEN`/`GH_TOKEN` ortam değişkenlerinden biri gerekli.")
+        st.error("GitHub token bulunamadı. `GH_TOKEN`/`GITHUB_TOKEN` (secrets/env) veya components.config.GH_TOKEN gerekli.")
         st.stop()
+
+    if "/" not in DATA_REPO:
+        st.error(f"DATA_REPO beklenen formatta değil: {DATA_REPO} (örn. cem5113/crime_prediction_data)")
+        st.stop()
+    owner, repo = DATA_REPO.split("/", 1)
 
     # FR verisi
     fr_zip = download_actions_artifact_zip(owner, repo, "fr-crime-pipeline-output", token)
     df_fr = _read_parquet_from_zip(
         fr_zip,
-        candidate_names=[
-            "fr_crime_09.parquet",
-            "fr-crime_09.parquet",
-            "fr_crime_09.paquet",
-            "fr-crime_09.paquet",
-        ],
+        ["fr_crime_09.parquet", "fr-crime_09.parquet", "fr_crime_09.paquet", "fr-crime_09.paquet"],
     )
 
-    # Stacking metrikleri (SF)
+    # Stacking metrikleri
     sf_zip = download_actions_artifact_zip(owner, repo, "sf-crime-parquet", token)
     metrics = _read_parquet_from_zip(
         sf_zip,
-        candidate_names=[
-            "metrics_stacking_ohe.parquet",
-            "metrics_stacking.parquet",
-            "metrics_stacking_ohe.paquet",
-            "metrics_stacking.paquet",
-        ],
+        ["metrics_stacking_ohe.parquet", "metrics_stacking.parquet", "metrics_stacking_ohe.paquet", "metrics_stacking.paquet"],
     )
-
     return df_fr, metrics
 
+# ── 2) Veri çek
 df, metrics = load_data()
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 2) Yardımcılar
-# ──────────────────────────────────────────────────────────────────────────────
+# ── 3) Kolon eşitleme
 def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     lower = {c.lower(): c for c in df.columns}
-
     def alias(src_opts: list[str], target: str):
         for s in src_opts:
             if s in df.columns:
-                if target not in df.columns:
-                    df[target] = df[s]
+                if target not in df.columns: df[target] = df[s]
                 return
             s_low = s.lower()
             if s_low in lower:
                 orig = lower[s_low]
-                if target not in df.columns:
-                    df[target] = df[orig]
+                if target not in df.columns: df[target] = df[orig]
                 return
 
     alias(["GEOID", "geoid", "Geoid", "id", "cell_id"], "GEOID")
@@ -177,10 +146,8 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     alias(["datetime", "ts", "timestamp", "Datetime"], "datetime")
 
     if "hour" not in df.columns and "datetime" in df.columns:
-        try:
-            df["hour"] = pd.to_datetime(df["datetime"]).dt.hour
-        except Exception:
-            pass
+        try: df["hour"] = pd.to_datetime(df["datetime"]).dt.hour
+        except Exception: pass
 
     if "risk_score" not in df.columns:
         parts = []
@@ -188,36 +155,24 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
             if c in df.columns:
                 x = (pd.to_numeric(df[c], errors="coerce").fillna(0).astype(float) + 1)
                 parts.append(x / (x.max() if x.max() > 0 else 1))
-        if parts:
-            df["risk_score"] = np.clip(0.4 * parts[0] + sum(parts[1:]) * 0.2, 0.01, 0.99)
-        else:
-            df["risk_score"] = 0.5
+        df["risk_score"] = np.clip(0.4 * parts[0] + sum(parts[1:]) * 0.2, 0.01, 0.99) if parts else 0.5
     return df
 
 df = ensure_columns(df)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 3) Başlık
-# ──────────────────────────────────────────────────────────────────────────────
+# ── 4) UI
 st.title("🔎 Suç Tahmin Modülü (Yalnız Kolluğa Yararlı)")
 st.markdown("Zaman, mekân ve kategori bazlı risk tahminleri — yalnız kolluk için anlamlı sonuçlar gösterilir.")
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 4) Filtreler
-# ──────────────────────────────────────────────────────────────────────────────
 col1, col2, col3 = st.columns(3)
 with col1:
     default_date = None
     if "date" in df.columns:
-        try:
-            default_date = pd.to_datetime(df["date"], errors="coerce").dropna().dt.date.max()
-        except Exception:
-            default_date = None
+        try: default_date = pd.to_datetime(df["date"], errors="coerce").dropna().dt.date.max()
+        except Exception: default_date = None
     elif "datetime" in df.columns:
-        try:
-            default_date = pd.to_datetime(df["datetime"], errors="coerce").dropna().dt.date.max()
-        except Exception:
-            default_date = None
+        try: default_date = pd.to_datetime(df["datetime"], errors="coerce").dropna().dt.date.max()
+        except Exception: default_date = None
     date_selected = st.date_input("Tarih seçin", value=default_date)
 
 with col2:
@@ -226,35 +181,22 @@ with col2:
     hour_selected = st.slider("Saat aralığı seçin", 0, 23, (max(min_h, 0), min(max_h, 23)))
 
 with col3:
-    if "Category" in df.columns:
-        cats = sorted([c for c in df["Category"].dropna().unique().tolist() if str(c).strip() != ""])
-    else:
-        cats = []
+    cats = sorted([c for c in df.get("Category", pd.Series(dtype=str)).dropna().unique().tolist() if str(c).strip() != ""]) if "Category" in df.columns else []
     category_selected = st.selectbox("Suç kategorisi", ["(Hepsi)"] + cats)
 
 show_only_relevant = st.toggle("🔒 Yalnız kolluğa yararlı sonuçları göster", value=True)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 5) Tarih filtresi
-# ──────────────────────────────────────────────────────────────────────────────
+# ── 5) Filtreler
 mask = pd.Series(True, index=df.index)
 if date_selected is not None:
     if "date" in df.columns:
-        try:
-            mask &= (pd.to_datetime(df["date"], errors="coerce").dt.date == date_selected)
-        except Exception:
-            pass
+        try: mask &= (pd.to_datetime(df["date"], errors="coerce").dt.date == date_selected)
+        except Exception: pass
     elif "datetime" in df.columns:
-        try:
-            mask &= (pd.to_datetime(df["datetime"], errors="coerce").dt.date == date_selected)
-        except Exception:
-            pass
-
+        try: mask &= (pd.to_datetime(df["datetime"], errors="coerce").dt.date == date_selected)
+        except Exception: pass
 view = df[mask].copy() if mask.any() else df.copy()
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 6) Risk eşiği ve diğer filtreler
-# ──────────────────────────────────────────────────────────────────────────────
 if "risk_score" in view.columns:
     q75 = view["risk_score"].quantile(0.75)
 else:
@@ -273,9 +215,7 @@ if view.empty:
     st.info("Eşiklere veya filtrelere göre gösterilecek kritik nokta yok.")
     st.stop()
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 7) Harita
-# ──────────────────────────────────────────────────────────────────────────────
+# ── 6) Harita
 center = [float(view["latitude"].mean()), float(view["longitude"].mean())] if {"latitude","longitude"}.issubset(view.columns) else [37.77, -122.42]
 m = folium.Map(location=center, zoom_start=12, tiles="CartoDB positron")
 
@@ -292,33 +232,23 @@ if {"latitude","longitude"}.issubset(view.columns):
             color = 'red' if row['risk_score'] >= q75_local else 'orange'
             folium.CircleMarker(
                 location=[float(row['latitude']), float(row['longitude'])],
-                radius=6,
-                color=color,
-                fill=True,
-                fill_opacity=0.7,
-                popup=popup_text
+                radius=6, color=color, fill=True, fill_opacity=0.7, popup=popup_text
             ).add_to(m)
         except Exception:
             continue
 
 st_folium(m, width=800, height=560)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 8) Tablo
-# ──────────────────────────────────────────────────────────────────────────────
+# ── 7) Tablo
 st.subheader("📊 Yüksek Riskli Noktalar")
 cols_to_show = [c for c in ["GEOID","hour","Category","risk_score","latitude","longitude"] if c in view.columns]
 st.dataframe(view[cols_to_show].sort_values(by="risk_score", ascending=False).head(50), use_container_width=True)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 9) Stacking metrikleri
-# ──────────────────────────────────────────────────────────────────────────────
+# ── 8) Stacking metrikleri
 st.subheader("📈 Model Performans Özeti (Stacking)")
 st.dataframe(metrics, use_container_width=True)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 10) Export
-# ──────────────────────────────────────────────────────────────────────────────
+# ── 9) Export
 st.download_button(
     "⬇️ Hotspot verisini indir (CSV)",
     view.to_csv(index=False).encode("utf-8"),
