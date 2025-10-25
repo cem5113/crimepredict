@@ -1,44 +1,91 @@
-# 3_🧭_Suç_Tahmini.py
-import io, zipfile
+# pages/3_🧭_Suç_Tahmini.py
+import io, os, zipfile
+import requests
 import streamlit as st
 import pandas as pd
 import numpy as np
 import folium
 from streamlit_folium import st_folium
-from datetime import datetime
 
-# --- Güvenli import (hata ekranı ile) ---
-for name, stmt in [
-    ("components.config", "from components.config import APP_NAME, APP_ROLE, DATA_REPO, DATA_BRANCH, GH_TOKEN"),
-    ("components.gh_data", "from components.gh_data import download_actions_artifact_zip"),
-    ("streamlit", "import streamlit as st"),
-    ("pandas", "import pandas as pd"),
-    ("numpy", "import numpy as np"),
-    ("folium", "import folium"),
-    ("streamlit_folium", "from streamlit_folium import st_folium"),
-]:
+# ──────────────────────────────────────────────────────────────────────────────
+# 0) Config & Token çözümleme (harici modüle bağımlı değil)
+# ──────────────────────────────────────────────────────────────────────────────
+def resolve_repo_and_token():
+    owner_repo = None
+    token = None
+
+    # 1) components.config
     try:
-        exec(stmt, {})
-    except Exception as e:
-        import streamlit as st
-        st.error(f"Import hatası: {name} → {type(e).__name__}: {e}")
+        from components.config import DATA_REPO, GH_TOKEN
+        owner_repo = DATA_REPO
+        token = GH_TOKEN
+    except Exception:
+        pass
+
+    # 2) secrets
+    if not token:
+        for k in ("GH_TOKEN", "github_token", "GITHUB_TOKEN"):
+            try:
+                if k in st.secrets and st.secrets[k]:
+                    token = str(st.secrets[k])
+                    break
+            except Exception:
+                pass
+
+    # 3) env
+    if not token:
+        token = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN") or os.getenv("github_token")
+
+    # 4) owner/repo yoksa fallback
+    if not owner_repo:
+        # İstediğin repo'yu buraya yazabilirsin:
+        owner_repo = "cem5113/crime_prediction_data"
+
+    # doğrula
+    if "/" not in owner_repo:
+        st.error(f"DATA_REPO beklenen formatta değil: {owner_repo} (örn. cem5113/crime_prediction_data)")
         st.stop()
+    return owner_repo, token
+
+def gh_headers(token: str | None) -> dict:
+    h = {"Accept": "application/vnd.github+json"}
+    if token:
+        h["Authorization"] = f"Bearer {token}"
+    return h
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 1) Artifact'ten PARQUET/PAQUET okuma
+# 1) Actions artifact'ten ZIP indirme (yerel implementasyon)
 # ──────────────────────────────────────────────────────────────────────────────
+def download_actions_artifact_zip(owner: str, repo: str, artifact_name: str, token: str | None) -> bytes:
+    """
+    En güncel, süresi dolmamış artifact'i bulur ve ZIP baytlarını döndürür.
+    """
+    base = f"https://api.github.com/repos/{owner}/{repo}/actions/artifacts"
+    r = requests.get(base, headers=gh_headers(token), timeout=30)
+    r.raise_for_status()
+    items = r.json().get("artifacts", [])
+    cand = [a for a in items if a.get("name") == artifact_name and not a.get("expired", False)]
+    if not cand:
+        raise FileNotFoundError(f"Artifact bulunamadı: {artifact_name}")
+    cand.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
+    url = cand[0].get("archive_download_url")
+    if not url:
+        raise RuntimeError("archive_download_url bulunamadı")
+    r2 = requests.get(url, headers=gh_headers(token), timeout=60)
+    r2.raise_for_status()
+    return r2.content
+
 @st.cache_data(show_spinner=True)
 def _read_parquet_from_zip(zip_bytes: bytes, candidate_names: list[str]) -> pd.DataFrame:
     """
-    GitHub Actions artifact zip baytlarından, verilen son-ad eşleşmelerine göre
-    ilk uygun PARQUET/PAQUET dosyasını bulup DataFrame döndürür.
-    Eşleşme: önce tam uçtan (case-insensitive), sonra kısmi içerir eşleşmesi.
+    ZIP içinden .parquet/.paquet dosyayı bulup okur.
+    Önce tam uçtan (case-insensitive), sonra kısmi içerir eşleşmesi.
     """
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         names = zf.namelist()
-
-        # 1) Tam uçtan eşleşme (case-insensitive)
         low_names = [n.lower() for n in names]
+
+        # 1) Tam uçtan eşleşme
         for cand in candidate_names:
             c = cand.lower()
             for i, ln in enumerate(low_names):
@@ -53,7 +100,6 @@ def _read_parquet_from_zip(zip_bytes: bytes, candidate_names: list[str]) -> pd.D
                 with zf.open(names[i]) as f:
                     return pd.read_parquet(f)
 
-        # Bulunamadı
         raise FileNotFoundError(
             "ZIP içinde beklenen PARQUET/PAQUET bulunamadı.\n"
             f"Aranan: {candidate_names}\n"
@@ -66,30 +112,15 @@ def load_data():
     - fr-crime-pipeline-output → fr_crime_09.parquet (veya .paquet)
     - sf-crime-parquet        → metrics_stacking_ohe.parquet (veya .paquet)
     """
-    # config
-    try:
-        from components.config import DATA_REPO, GH_TOKEN
-    except Exception:
-        st.error("components.config içinden DATA_REPO / GH_TOKEN okunamadı.")
+    owner_repo, token = resolve_repo_and_token()
+    owner, repo = owner_repo.split("/", 1)
+
+    if not token:
+        st.error("GitHub token bulunamadı. `components.config.GH_TOKEN`, `st.secrets`, ya da `GITHUB_TOKEN`/`GH_TOKEN` ortam değişkenlerinden biri gerekli.")
         st.stop()
 
-    try:
-        owner, repo = DATA_REPO.split("/", 1)
-    except ValueError:
-        st.error(f"DATA_REPO beklenen formatta değil: {DATA_REPO} (örn. cem5113/crime_prediction_data)")
-        st.stop()
-
-    if not GH_TOKEN:
-        st.error("GH_TOKEN gerekli. components.config içinde GH_TOKEN tanımlayın.")
-        st.stop()
-
-    # 1) FR verisi — fr-crime-pipeline-output
-    fr_zip = download_actions_artifact_zip(
-        owner=owner,
-        repo=repo,
-        artifact_name="fr-crime-pipeline-output",
-        token=GH_TOKEN,
-    )
+    # FR verisi
+    fr_zip = download_actions_artifact_zip(owner, repo, "fr-crime-pipeline-output", token)
     df_fr = _read_parquet_from_zip(
         fr_zip,
         candidate_names=[
@@ -100,13 +131,8 @@ def load_data():
         ],
     )
 
-    # 2) Stacking metrikleri — sf-crime-parquet
-    sf_zip = download_actions_artifact_zip(
-        owner=owner,
-        repo=repo,
-        artifact_name="sf-crime-parquet",
-        token=GH_TOKEN,
-    )
+    # Stacking metrikleri (SF)
+    sf_zip = download_actions_artifact_zip(owner, repo, "sf-crime-parquet", token)
     metrics = _read_parquet_from_zip(
         sf_zip,
         candidate_names=[
@@ -125,10 +151,6 @@ df, metrics = load_data()
 # 2) Yardımcılar
 # ──────────────────────────────────────────────────────────────────────────────
 def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Sütun adları farklı varyantlarla gelirse, standart alias kolonlar oluştur.
-    Beklenen: GEOID, Category, hour, latitude, longitude, risk_score, date/datetime
-    """
     lower = {c.lower(): c for c in df.columns}
 
     def alias(src_opts: list[str], target: str):
@@ -137,8 +159,9 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
                 if target not in df.columns:
                     df[target] = df[s]
                 return
-            if s.lower() in lower:
-                orig = lower[s.lower()]
+            s_low = s.lower()
+            if s_low in lower:
+                orig = lower[s_low]
                 if target not in df.columns:
                     df[target] = df[orig]
                 return
@@ -153,14 +176,12 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
     alias(["date", "Date"], "date")
     alias(["datetime", "ts", "timestamp", "Datetime"], "datetime")
 
-    # Eğer hour yok ama datetime varsa çıkar
     if "hour" not in df.columns and "datetime" in df.columns:
         try:
             df["hour"] = pd.to_datetime(df["datetime"]).dt.hour
         except Exception:
             pass
 
-    # risk_score yoksa basit yedek skor üret (kalibre değil)
     if "risk_score" not in df.columns:
         parts = []
         for c in ["neighbor_crime_24h", "911_request_count_hour_range", "crime_count", "daily_cnt"]:
@@ -170,7 +191,7 @@ def ensure_columns(df: pd.DataFrame) -> pd.DataFrame:
         if parts:
             df["risk_score"] = np.clip(0.4 * parts[0] + sum(parts[1:]) * 0.2, 0.01, 0.99)
         else:
-            df["risk_score"] = 0.5  # düz sabit
+            df["risk_score"] = 0.5
     return df
 
 df = ensure_columns(df)
