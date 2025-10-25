@@ -221,15 +221,15 @@ def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
             props["risk_score_daily"] = val
             disp = min(val, 0.999) 
             props["risk_score_txt"] = f"{disp:.3f}"
-            if abs(val) <= EPS: lvl = "zero"
-            elif val <= q25:   lvl = "low"
-            elif val <= q50:   lvl = "medium"
-            elif val <= q75:   lvl = "high"
-            else:              lvl = "critical"
+            if abs(val) <= EPS: lvl = "çok düşük riskli"
+            elif val <= q25:   lvl = "düşük riskli"
+            elif val <= q50:   lvl = "orta riskli"
+            elif val <= q75:   lvl = "riskli"
+            else:              lvl = "yüksek riskli"
             enriched += 1
 
         if lvl is None:
-            lvl = props.get("risk_level", "zero")
+            lvl = props.get("risk_level", "çok düşük riskli")
         props["risk_level"] = lvl
         props["fill_color"] = COLOR_MAP.get(lvl, [220, 220, 220])
 
