@@ -1,31 +1,9 @@
-# --- app.py (baş kısım) ---------------------------------
 import streamlit as st
 import pandas as pd
 import numpy as np
 import folium
 from streamlit_folium import st_folium
 from datetime import datetime
-import os, sys
-
-# 1) components/ yolu mevcutsa ekle (farklı dizin düzenlerinde yardımcı olur)
-_here = os.path.dirname(os.path.abspath(__file__))
-components_dir = os.path.join(_here, "components")
-if os.path.isdir(components_dir) and components_dir not in sys.path:
-    sys.path.append(components_dir)
-
-# 2) config'i koşullu içe aktar: yoksa varsayılanları kullan
-try:
-    # DİKKAT: Satırda fazladan karakter yok (özellikle 'ü' vs.)
-    from components.config import APP_NAME, APP_ROLE, DATA_REPO, DATA_BRANCH  # type: ignore
-except Exception:
-    APP_NAME = "Crime Prediction Dashboard"
-    APP_ROLE = "Kolluk Kuvvetleri için Suç Tahmini"
-    DATA_REPO = "cem5113/crime_prediction_data"
-    DATA_BRANCH = "main"
-    st.sidebar.info("⚙️ components/config.py bulunamadı. Varsayılan yapılandırma kullanılıyor.")
-# ---------------------------------------------------------
-
-# ---------------------------------------------------------
 
 # --- 1) Veri yükleme ---
 # Kaynaklar:
@@ -35,49 +13,67 @@ except Exception:
 @st.cache_data(show_spinner=False)
 def load_data():
     """Veriyi sağlam şekilde yükler. Önce raw CSV, olmazsa ZIP (repo/raw veya releases).
-    Dönenler: (df, metrics)
-    """
+    Hata durumunda ZIP içeriğini listeleyip ekranın altına yazdırır (debug için)."""
     import io, zipfile, requests
 
-    RAW_FR_CSV = (
-        "https://github.com/cem5113/crime_prediction_data/raw/main/"
-        "artifact/fr-crime-pipeline-output/fr_crime_09.csv"
-    )
-    RAW_METRICS_CSV = (
-        "https://github.com/cem5113/crime_prediction_data/raw/main/"
-        "artifact/sf-crime-pipeline-output/metrics_stacking_ohe.csv"
-    )
+    # Opsiyonel: components.config varsa, oradan repo/branch al
+    try:
+        from components.config import DATA_REPO, DATA_BRANCH
+        RAW_BASE = f"https://raw.githubusercontent.com/{DATA_REPO}/{DATA_BRANCH}"
+    except Exception:
+        RAW_BASE = "https://raw.githubusercontent.com/cem5113/crime_prediction_data/main"
 
-    ZIP_FR_RAW = "https://github.com/cem5113/crime_prediction_data/raw/main/artifact/fr-crime-pipeline-output.zip"
-    ZIP_SF_RAW = "https://github.com/cem5113/crime_prediction_data/raw/main/artifact/sf-crime-pipeline-output.zip"
+    RAW_FR_CSV = f"{RAW_BASE}/artifact/fr-crime-pipeline-output/fr_crime_09.csv"
+    RAW_METRICS_CSV = f"{RAW_BASE}/artifact/sf-crime-pipeline-output/metrics_stacking_ohe.csv"
 
-    ZIP_FR_REL = "https://github.com/cem5113/crime_prediction_data/releases/latest/download/fr-crime-pipeline-output.zip"
-    ZIP_SF_REL = "https://github.com/cem5113/crime_prediction_data/releases/latest/download/sf-crime-pipeline-output.zip"
+    ZIP_FR_RAW = f"{RAW_BASE}/artifact/fr-crime-pipeline-output.zip"
+    ZIP_SF_RAW = f"{RAW_BASE}/artifact/sf-crime-pipeline-output.zip"
+
+    # Releases ZIP dosyaları (asset olarak yüklenmişse)
+    REL_BASE = "https://github.com/cem5113/crime_prediction_data/releases/latest/download"
+    ZIP_FR_REL = f"{REL_BASE}/fr-crime-pipeline-output.zip"
+    ZIP_SF_REL = f"{REL_BASE}/sf-crime-pipeline-output.zip"
+
+    def _pick_member(zf: zipfile.ZipFile, wanted_name_endswith: str) -> str | None:
+        names = zf.namelist()
+        # 1) Tam uçtan eşleşme
+        for n in names:
+            if n.endswith(wanted_name_endswith):
+                return n
+        # 2) Küçük harf, kısmi ad (ör. fr_crime_09)
+        base = wanted_name_endswith.rsplit(".", 1)[0].lower()
+        for n in names:
+            if base in n.lower():
+                return n
+        return None
 
     def _read_csv_or_from_zip(primary_csv_url: str, fallback_zips: list[str], wanted_name_endswith: str) -> pd.DataFrame:
         # 1) doğrudan CSV dene
         try:
             return pd.read_csv(primary_csv_url)
-        except Exception:
-            pass
+        except Exception as e_csv:
+            st.caption(f"CSV denemesi başarısız: {primary_csv_url} — {e_csv}")
         # 2) ZIP'lerden sırayla dene
+        last_err = None
         for url in fallback_zips:
             try:
                 r = requests.get(url, timeout=60)
                 r.raise_for_status()
                 with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
-                    member = None
-                    for name in zf.namelist():
-                        if name.endswith(wanted_name_endswith):
-                            member = name
-                            break
+                    member = _pick_member(zf, wanted_name_endswith)
                     if member is None:
+                        st.warning("ZIP içinde beklenen dosya bulunamadı. İçerik listesi aşağıda.")
+                        st.text("
+".join(zf.namelist()[:50]))
                         continue
                     with zf.open(member) as f:
+                        st.caption(f"ZIP içinden yüklendi: {url.split('/')[-1]} → {member}")
                         return pd.read_csv(f)
-            except Exception:
+            except Exception as e_zip:
+                last_err = e_zip
+                st.caption(f"ZIP denemesi başarısız: {url} — {e_zip}")
                 continue
-        raise FileNotFoundError(f"{wanted_name_endswith} indirilemedi veya ZIP içinde bulunamadı.")
+        raise FileNotFoundError(f"{wanted_name_endswith} indirilemedi veya ZIP içinde bulunamadı. Son hata: {last_err}")
 
     df = _read_csv_or_from_zip(RAW_FR_CSV, [ZIP_FR_RAW, ZIP_FR_REL], "fr_crime_09.csv")
     metrics = _read_csv_or_from_zip(RAW_METRICS_CSV, [ZIP_SF_RAW, ZIP_SF_REL], "metrics_stacking_ohe.csv")
