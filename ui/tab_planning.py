@@ -1,17 +1,45 @@
 # ui/tab_planning.py
 import streamlit as st
 import requests
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from enum import Enum
 
-from ui.state import TimeMode
-from config import settings
+# --- TimeMode'u ui.state'den almaya çalış; yoksa lokal tanımla ---
+try:
+    from ui.state import TimeMode  # optional
+except Exception:
+    class TimeMode(str, Enum):
+        NOW = "now"
+        HOURLY = "hourly"
+        DAILY = "daily"
+
+# --- Settings importu: config.settings bekleniyor ---
+try:
+    from config import settings
+except Exception:
+    # Güvenli varsayılanlar (settings yoksa dev fallback)
+    class _FallbackSettings:
+        RISK_MULTIPLIER_ENABLED = True
+        RISK_MULTIPLIER = 1.0
+        DEFAULT_TZ = "America/Los_Angeles"
+    settings = _FallbackSettings()
 
 API_BASE = st.secrets.get("API_BASE", "http://localhost:8000")
 
 
+def _segmented(label: str, options, default, key: str):
+    """
+    Streamlit'te segmented_control yoksa radio'ya düş.
+    """
+    seg = getattr(st, "segmented_control", None)
+    if callable(seg):
+        return seg(label, options, default=default, key=key)
+    # radio fallback
+    idx_default = options.index(default) if default in options else 0
+    return st.radio(label, options, index=idx_default, key=key, horizontal=True)
+
+
 def _fetch_recommendations(mode: str, offset: int, tz: str):
-    """API'den devriye önerilerini çeker."""
+    """API'den devriye önerilerini çeker (hata güvenli)."""
     try:
         resp = requests.get(
             f"{API_BASE}/patrol/predict",
@@ -29,13 +57,14 @@ def render_planning():
     st.header("🚓 Devriye Planlama")
 
     # --- Zaman Modu Seçici ---
-    mode = st.segmented_control(
+    mode = _segmented(
         "Zaman modu",
         [TimeMode.NOW.value, TimeMode.HOURLY.value, TimeMode.DAILY.value],
         default=TimeMode.NOW.value,
         key="time_mode",
     )
 
+    # --- Offset kontrolü ---
     if mode == TimeMode.NOW.value:
         offset = 0
     elif mode == TimeMode.HOURLY.value:
@@ -43,10 +72,10 @@ def render_planning():
     else:
         offset = st.slider("Günlük ufuk (gün)", 1, 3, 1, 1)
 
-    # Opsiyonel risk multiplier kontrolü
+    # --- Opsiyonel risk multiplier kontrolü ---
     rm_enabled = st.toggle(
         "Risk çarpanı aktif",
-        value=settings.RISK_MULTIPLIER_ENABLED,
+        value=getattr(settings, "RISK_MULTIPLIER_ENABLED", True),
         key="rm_en",
     )
     if rm_enabled:
@@ -54,25 +83,26 @@ def render_planning():
             "Risk çarpanı",
             0.5,
             2.0,
-            float(settings.RISK_MULTIPLIER),
+            float(getattr(settings, "RISK_MULTIPLIER", 1.0)),
             0.05,
         )
     else:
-        rm = settings.RISK_MULTIPLIER
+        rm = float(getattr(settings, "RISK_MULTIPLIER", 1.0))
 
-    # Parametre hash (basit)
+    # --- Parametre hash (basit) ---
     param_key = f"{mode}:{offset}:{rm_enabled}:{rm}"
 
-    # --- Öneri Al (buton ya da parametre değişimi ile tetikleme) ---
+    # --- Öneri Al (buton ya da parametre değişimi ile) ---
     should_fetch = st.button("Devriye Öner") or (
         st.session_state.get("last_params") != param_key
     )
-
     if should_fetch:
         st.session_state["last_params"] = param_key
         with st.spinner("Öneriler oluşturuluyor..."):
             data, err = _fetch_recommendations(
-                mode=mode, offset=offset, tz=settings.DEFAULT_TZ
+                mode=mode,
+                offset=offset,
+                tz=getattr(settings, "DEFAULT_TZ", "America/Los_Angeles"),
             )
         if err:
             st.error(err)
@@ -87,9 +117,7 @@ def render_planning():
 
     # Zaman penceresi
     tw = resp.get("time_window", {})
-    st.caption(
-        f"Zaman penceresi: {tw.get('start','?')} → {tw.get('end','?')}"
-    )
+    st.caption(f"Zaman penceresi: {tw.get('start','?')} → {tw.get('end','?')}")
 
     # Skor paneli
     scores = resp.get("scores", {})
