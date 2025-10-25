@@ -43,30 +43,36 @@ def list_actions_artifacts(owner: str, repo: str, token: str | None) -> list[dic
     data = r.json() if r.headers.get("content-type","").startswith("application/json") else {}
     return data.get("artifacts", [])
 
-def download_actions_artifact_zip(owner: str, repo: str, artifact_name: str, token: str | None) -> bytes:
-    arts = list_actions_artifacts(owner, repo, token)
-    if not arts:
-        raise FileNotFoundError("Repo’da hiç artifact bulunamadı (liste boş).")
+def download_actions_artifact_zip(owner: str, repo: str, artifact_name: str, token: str | None = None) -> bytes:
+    """
+    Belirtilen GitHub Actions artifact'ini indirir ve zip içeriğini byte olarak döndürür.
+    """
+    import requests, streamlit as st
 
-    # (İsterseniz debug için gösterin)
-    st.caption("🔎 Bulunan artifact’ler (ilk 10): " + ", ".join(
-        [f"{a.get('name')}@{a.get('updated_at','?')}" for a in arts[:10]]
-    ))
+    def _gh_headers(token: str | None) -> dict:
+        h = {"Accept": "application/vnd.github+json"}
+        if token:
+            h["Authorization"] = f"Bearer {token}"
+        return h
+
+    # Artifact'leri listele
+    url = f"https://api.github.com/repos/{owner}/{repo}/actions/artifacts?per_page=100"
+    r = requests.get(url, headers=_gh_headers(token), timeout=30)
+    r.raise_for_status()
+    arts = r.json().get("artifacts", [])
+
+    if not arts:
+        raise FileNotFoundError(f"Repo {repo} içinde artifact bulunamadı.")
 
     candidates = [a for a in arts if a.get("name") == artifact_name and not a.get("expired", False)]
     if not candidates:
-        close = [a.get("name") for a in arts if artifact_name.lower().replace("-", "").replace("_","")
-                 in str(a.get("name","")).lower().replace("-", "").replace("_","")]
-        msg = f"Artifact bulunamadı: '{artifact_name}'."
-        if close:
-            msg += f" Benzerler: {', '.join(close[:5])}"
-        raise FileNotFoundError(msg)
+        raise FileNotFoundError(f"Artifact bulunamadı: {artifact_name}")
 
+    # En güncel olanı al
     candidates.sort(key=lambda x: x.get("updated_at",""), reverse=True)
-    url = candidates[0].get("archive_download_url")
-    if not url:
-        raise RuntimeError("archive_download_url alanı yok (artifact expire olmuş olabilir).")
+    url = candidates[0]["archive_download_url"]
 
+    # ZIP indir
     r = requests.get(url, headers=_gh_headers(token), timeout=60)
     r.raise_for_status()
     return r.content
