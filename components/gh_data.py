@@ -7,6 +7,7 @@ from components.config import DATA_REPO, DATA_BRANCH, RAW_BASE, GH_TOKEN
 import os
 import requests
 import streamlit as st
+import os
 
 # ---- Basit RAW okuma (public dosyalar) ----
 def raw_url(path: str) -> str:
@@ -15,11 +16,18 @@ def raw_url(path: str) -> str:
 
 # ---- GitHub REST helper ----
 def _gh_headers():
-    h = {"Accept": "application/vnd.github+json"}
-    tok = os.getenv("GITHUB_TOKEN") or st.secrets.get("GH_TOKEN", None)
-    if tok:
-        h["Authorization"] = f"Bearer {tok}"
-    return h
+    def _gh_headers():
+     h = {"Accept": "application/vnd.github+json"}
+     tok = os.getenv("GITHUB_TOKEN") or GH_TOKEN
+     # st.secrets bazı ortamlarda import anında erişilemez; güvenli dene
+     if not tok:
+         try:
+             tok = st.secrets.get("GH_TOKEN", None)  # yoksa None döner
+         except Exception:
+             tok = None
+     if tok:
+         h["Authorization"] = f"Bearer {tok}"
+     return h
 
 # ---- Releases -> asset indirme (isme göre, en yeni) ----
 def download_release_asset_by_name(asset_name: str, out_dir: str | Path) -> Path:
@@ -51,7 +59,7 @@ def download_actions_artifact_zip(artifact_name: str, out_dir: str | Path) -> Pa
     Repo'daki son başarılı workflow artifact'ini indirir (zip).
     GH_TOKEN gerekir (Actions artifact indirme yetkisi).
     """
-    if not GH_TOKEN:
+    if not (os.getenv("GITHUB_TOKEN") or GH_TOKEN):
         raise RuntimeError("GH_TOKEN gerekiyor (actions artifact indirmek için).")
 
     out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
