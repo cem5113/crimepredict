@@ -57,7 +57,7 @@ token = resolve_and_set_github_token()
 
 with st.expander("🔐 Bağlantı & Token Tanılama", expanded=token is None):
     st.write("**Veri deposu:**", DATA_REPO, "—", DATA_BRANCH)
-    st.code(raw_url("crime_prediction_data/risk_hourly.parquet"), language="text")
+    st.code(raw_url("sf-crime-parquet/risk_hourly.parquet"), language="text")
 
     cols = st.columns(3)
     cols[0].metric("Token bulundu mu?", "Evet" if bool(token) else "Hayır")
@@ -81,19 +81,19 @@ links = st.columns([1,1,2])
 with links[0]:
     try:
         # Streamlit 1.30+ için
-        st.page_link("pages/01_🧭_Suç_Tahmini.py", label="🧭 Suç Tahmini", icon="🧭")
+        st.page_link("pages/3_🔮_Suç_Tahmini.py",   label="🔮 Suç Tahmini", icon="🔮")
     except Exception:
         st.write("`pages/01_🧭_Suç_Tahmini.py` hazırsa soldaki **Pages** menüsünden ulaşabilirsin.")
 
 with links[1]:
     try:
-        st.page_link("pages/02_📈_Öznitelik_Analizi.py", label="📈 Öznitelik Analizi", icon="📈")
+        st.page_link("pages/2_🗺️_Risk_Haritası.py", label="🗺️ Risk Haritası", icon="🗺️")
     except Exception:
         pass
 
 # ── (Opsiyonel) GitHub Actions artifact indirme & açma
 with st.expander("📦 Actions artifact indir (opsiyonel)"):
-    artifact_name_input = st.text_input("Artifact adı", value="fr-crime-pipeline-output")
+    artifact_name_input = st.text_input("Artifact adı", value="sf-crime-parquet")
     download_dir = st.text_input("İndirme klasörü", value="downloads")
     extract_dir  = st.text_input("Çıkarma klasörü", value="downloads/extracted")
     run_btn = st.button("Artifact'ı indir ve çıkar")
