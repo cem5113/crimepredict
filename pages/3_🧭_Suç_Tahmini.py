@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import geopandas as gpd
 import folium
 from streamlit_folium import st_folium
 
@@ -9,12 +10,62 @@ from streamlit_folium import st_folium
 
 @st.cache_data
 def load_data():
-    # Ana suç verisi (fr_crime_09.csv)
-    df = pd.read_csv('https://github.com/cem5113/crime_prediction_data/raw/main/artifact/fr-crime-pipeline-output/fr_crime_09.csv')
+    """Veriyi sağlam şekilde yükler.
+    1) Önce doğrudan CSV yolunu dener (eğer repo içinde açık klasör varsa)
+    2) Olmazsa ZIP'i indirip içinden dosyayı okur (artefact yapısı için güvenli yol)
+    """
+    import io, zipfile, requests
 
-    # Stacking metrikleri (metrics_stacking_ohe.csv)
-    metrics = pd.read_csv('https://github.com/cem5113/crime_prediction_data/raw/main/artifact/sf-crime-pipeline-output/metrics_stacking_ohe.csv')
-    
+    # --- Kaynak tanımları ---
+    RAW_FR_CSV = (
+        "https://github.com/cem5113/crime_prediction_data/raw/main/"
+        "artifact/fr-crime-pipeline-output/fr_crime_09.csv"
+    )
+    RAW_METRICS_CSV = (
+        "https://github.com/cem5113/crime_prediction_data/raw/main/"
+        "artifact/sf-crime-pipeline-output/metrics_stacking_ohe.csv"
+    )
+
+    ZIP_FR = "https://github.com/cem5113/crime_prediction_data/raw/main/artifact/fr-crime-pipeline-output.zip"
+    ZIP_SF = "https://github.com/cem5113/crime_prediction_data/raw/main/artifact/sf-crime-pipeline-output.zip"
+
+    # CSV okuma dene
+    df = None
+    metrics = None
+    try:
+        df = pd.read_csv(RAW_FR_CSV)
+    except Exception:
+        # ZIP içinden oku
+        r = requests.get(ZIP_FR, timeout=60)
+        r.raise_for_status()
+        with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+            # Beklenen yol: fr-crime-pipeline-output/fr_crime_09.csv
+            member = None
+            for name in zf.namelist():
+                if name.endswith("fr_crime_09.csv"):
+                    member = name
+                    break
+            if member is None:
+                raise FileNotFoundError("fr_crime_09.csv ZIP içinde bulunamadı")
+            with zf.open(member) as f:
+                df = pd.read_csv(f)
+
+    try:
+        metrics = pd.read_csv(RAW_METRICS_CSV)
+    except Exception:
+        r = requests.get(ZIP_SF, timeout=60)
+        r.raise_for_status()
+        with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+            member = None
+            for name in zf.namelist():
+                if name.endswith("metrics_stacking_ohe.csv"):
+                    member = name
+                    break
+            if member is None:
+                raise FileNotFoundError("metrics_stacking_ohe.csv ZIP içinde bulunamadı")
+            with zf.open(member) as f:
+                metrics = pd.read_csv(f)
+
     return df, metrics
 
 df, metrics = load_data()
