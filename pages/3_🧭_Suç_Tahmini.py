@@ -5,11 +5,15 @@ import folium
 from streamlit_folium import st_folium
 from datetime import datetime
 
-# Eğer components/config.py yoksa, aşağıdaki değerleri burada sabitle:
-APP_NAME = "Crime Prediction Dashboard"
-APP_ROLE = "Kolluk Kuvvetleri için Suç Tahmini"
-DATA_REPO = "cem5113/crime_prediction_data"
-DATA_BRANCH = "main"
+# --- Config: components/config.py varsa kullan; yoksa sabitleri burada tanımla ---
+try:
+    # DİKKAT: SONUNDA HİÇBİR KARAKTER OLMAYACAK (özellikle 'ü' yok!)
+    from components.config import APP_NAME, APP_ROLE, DATA_REPO, DATA_BRANCH  # noqa: F401
+except Exception:
+    APP_NAME = "Crime Prediction Dashboard"
+    APP_ROLE = "Kolluk Kuvvetleri için Suç Tahmini"
+    DATA_REPO = "cem5113/crime_prediction_data"
+    DATA_BRANCH = "main"
 
 # --- 1) Veri yükleme ---
 # Kaynaklar:
