@@ -6,31 +6,28 @@ import pandas as pd
 import numpy as np
 import folium
 from streamlit_folium import st_folium
+from components.config import APP_NAME, APP_ROLE, DATA_REPO, DATA_BRANCH, GH_TOKEN
 
-# ── 0) Normal import + güvenli fallback
-try:
-    from components.config import APP_NAME, APP_ROLE, DATA_REPO, DATA_BRANCH, GH_TOKEN
-except Exception:
-    # minimum fallback: sadece DATA_REPO/GH_TOKEN gerekli
-    APP_NAME = "CrimePredict"
-    APP_ROLE = "analysis"
-    DATA_REPO = os.getenv("DATA_REPO", "cem5113/crime_prediction_data")
-    DATA_BRANCH = os.getenv("DATA_BRANCH", "main")
-    GH_TOKEN = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN")
+# minimum fallback: sadece DATA_REPO/GH_TOKEN gerekli
+APP_NAME = "CrimePredict"
+APP_ROLE = "analysis"
+DATA_REPO = os.getenv("DATA_REPO", "cem5113/crime_prediction_data")
+DATA_BRANCH = os.getenv("DATA_BRANCH", "main")
+GH_TOKEN = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN")
 
-    # ── Token çözümleme (env > secrets)
-    def resolve_github_token() -> str | None:
-        tok = os.getenv("GITHUB_TOKEN")
-        if tok:
-            return tok
-        for k in ("github_token", "GH_TOKEN", "GITHUB_TOKEN"):
-            try:
-                if k in st.secrets and st.secrets[k]:
-                    os.environ["GITHUB_TOKEN"] = str(st.secrets[k])  # env'e yazar
-                    return os.environ["GITHUB_TOKEN"]
-            except Exception:
-                pass
-        return None
+# ── Token çözümleme (env > secrets)
+def resolve_github_token() -> str | None:
+    tok = os.getenv("GITHUB_TOKEN")
+    if tok:
+        return tok
+    for k in ("github_token", "GH_TOKEN", "GITHUB_TOKEN"):
+        try:
+            if k in st.secrets and st.secrets[k]:
+                os.environ["GITHUB_TOKEN"] = str(st.secrets[k])  # env'e yazar
+                return os.environ["GITHUB_TOKEN"]
+        except Exception:
+            pass
+    return None
 
 try:
     from components.gh_data import download_actions_artifact_zip  # tercih edilen yol
