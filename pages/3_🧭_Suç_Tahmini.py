@@ -18,6 +18,20 @@ except Exception:
     DATA_BRANCH = os.getenv("DATA_BRANCH", "main")
     GH_TOKEN = os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN")
 
+    # ── Token çözümleme (env > secrets)
+    def resolve_github_token() -> str | None:
+        tok = os.getenv("GITHUB_TOKEN")
+        if tok:
+            return tok
+        for k in ("github_token", "GH_TOKEN", "GITHUB_TOKEN"):
+            try:
+                if k in st.secrets and st.secrets[k]:
+                    os.environ["GITHUB_TOKEN"] = str(st.secrets[k])  # env'e yazar
+                    return os.environ["GITHUB_TOKEN"]
+            except Exception:
+                pass
+        return None
+
 try:
     from components.gh_data import download_actions_artifact_zip  # tercih edilen yol
 except Exception:
