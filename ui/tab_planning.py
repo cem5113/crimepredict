@@ -11,6 +11,23 @@ API_BASE = st.secrets.get("API_BASE", "http://localhost:8000")
 
 st.header("🚓 Devriye Planlama")
 
+def render_planning():
+    st.header("🚓 Devriye Planlama")
+
+    mode = st.segmented_control("Zaman modu", 
+        [TimeMode.NOW.value, TimeMode.HOURLY.value, TimeMode.DAILY.value],
+        default=TimeMode.NOW.value, key="time_mode")
+
+    if mode == TimeMode.NOW.value:
+        offset = 0
+    elif mode == TimeMode.HOURLY.value:
+        offset = st.slider("Saatlik ufuk (saat)", 1, 24, 3, 1)
+    else:
+        offset = st.slider("Günlük ufuk (gün)", 1, 3, 1, 1)
+
+    # geri kalan kod buraya, aynı girintide
+    st.write(f"Seçilen mod: {mode}, offset: {offset}")
+
 # --- Zaman Modu Seçici ---
 mode = st.segmented_control("Zaman modu", [TimeMode.NOW.value, TimeMode.HOURLY.value, TimeMode.DAILY.value],
 default=TimeMode.NOW.value, key="time_mode")
