@@ -663,14 +663,39 @@ with col2:
 
 horizon = st.sidebar.select_slider("Horizon (saat)", options=[24, 48, 72, 168], value=24)
 
-# Forecast başlangıcı için güvenli varsayılan (verinin son gününün 00:00'ı)
-fc_start_default = datetime.combine(safe_max_date, datetime.min.time())
+# Forecast başlangıcı için güvenli varsayılan
+from datetime import time
+
+# min/max'ı saat bilgisiyle oluştur (günün başı/sonu)
+min_dt_bound = datetime.combine(safe_min_date, time(0, 0, 0))
+max_dt_bound = datetime.combine(safe_max_date, time(23, 59, 59))
+
+# default değeri datetime olarak kur
+fc_start_default = datetime.combine(safe_max_date, time(0, 0, 0))
+
+# Eğer default, aralık dışına düşerse kıskaçla
+if fc_start_default < min_dt_bound:
+    fc_start_default = min_dt_bound
+if fc_start_default > max_dt_bound:
+    fc_start_default = max_dt_bound
+
+# Benzersiz key ve açık min/max ile widget
 fc_start = st.sidebar.datetime_input(
     "Forecast başlangıcı",
     value=fc_start_default,
+    min_value=min_dt_bound,
+    max_value=max_dt_bound,
     help="Varsayılan: veri son gününün 00:00",
-    key="fc_start_widget"
+    key="fc_start_widget_v2"
 )
+
+# Streamlit bazen pandas.Timestamp döndürebilir; Python datetime'a zorla
+try:
+    fc_start = pd.to_datetime(fc_start).to_pydatetime()
+except Exception:
+    # Son çare: defaulta dön
+    fc_start = fc_start_default
+
 
 # Nowcast düzeltmesi ayarları
 st.sidebar.header("Nowcast düzeltmesi")
