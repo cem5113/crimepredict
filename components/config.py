@@ -12,7 +12,7 @@ GH_TOKEN    = st.secrets.get("GH_TOKEN", None) or os.getenv("GITHUB_TOKEN")
 APP_NAME    = st.secrets.get("APP_NAME", "SUTAM – Suç Tahmin Modeli")
 APP_ROLE    = st.secrets.get("APP_ROLE", "Kullanıcı")
 
-ASSET_ZIP_1 = st.secrets.get("ASSET_ZIP_1", "fr-crime-pipeline-output.zip")
+ASSET_ZIP_1 = st.secrets.get("ASSET_ZIP_1", "fr_parquet_outputs")
 ASSET_DIR_1 = st.secrets.get("ASSET_DIR_1", "sf-crime-parquet")
 ASSET_DIR_2 = st.secrets.get("ASSET_DIR_2", "sf-crime-pipeline-output")
 
