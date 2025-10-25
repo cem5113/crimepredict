@@ -307,9 +307,6 @@ one_day = classify_quantiles(risk_daily, sel_date) if sel_date else pd.DataFrame
 
 if not one_day.empty:
     st.metric(
-        "Günlük Risk Dağılımı",
-        f"🔴 Yüksek riskli: {one_day['risk_level'].value_counts(normalize=True).get('critical',0)*100:.1f}% | 🟠 Riskli: {one_day['risk_level'].value_counts(normalize=True).get('high',0)*100:.1f}% | 🟡 Orta riskli: {one_day['risk_level'].value_counts(normalize=True).get('medium',0)*100:.1f}% | 🟢 Düşük riskli: {one_day['risk_level'].value_counts(normalize=True).get('low',0)*100:.1f}%"
-    )
     gj = fetch_geojson_smart(GEOJSON_PATH_LOCAL_DEFAULT, GEOJSON_PATH_LOCAL_DEFAULT, RAW_GEOJSON_OWNER, RAW_GEOJSON_REPO)
     enriched = inject_properties(gj, one_day)
     make_map(enriched)
