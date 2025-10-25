@@ -12,19 +12,19 @@ import requests
 # =========================
 # Ayarlar
 # =========================
-OWNER = "cem5113"
-REPO = "crime_prediction_data"
-ARTIFACT_NAME = "sf-crime-parquet"
+# --- Config / secrets üzerinden yükle ---
+cfg = st.secrets if "secrets" in dir(st) else {}
+
+USE_ARTIFACT = cfg.get("use_artifact", True)
+OWNER = cfg.get("artifact_owner", "cem5113")
+REPO = cfg.get("artifact_repo", "crime_prediction_data")
+ARTIFACT_NAME = cfg.get("artifact_name", "sf-crime-parquet")
 EXPECTED_PARQUET = "risk_hourly.parquet"
 
-# GeoJSON varsayılan lokal yol (repo'nun içinde mevcut)
-GEOJSON_PATH_LOCAL_DEFAULT = "data/sf_cells.geojson"
-# Artifact içindeki muhtemel yol (yoksa sorun değil; fallback çalışır)
-GEOJSON_IN_ZIP_PATH_DEFAULT = "data/sf_cells.geojson"
-
-# Raw GitHub fallback (public)
-RAW_GEOJSON_OWNER = "cem5113"
-RAW_GEOJSON_REPO = "crimepredict"
+GEOJSON_PATH_LOCAL_DEFAULT = cfg.get("geojson_path", "data/sf_cells.geojson")
+GEOJSON_IN_ZIP_PATH_DEFAULT = GEOJSON_PATH_LOCAL_DEFAULT
+RAW_GEOJSON_OWNER = cfg.get("geojson_owner", "cem5113")
+RAW_GEOJSON_REPO = cfg.get("geojson_repo", "crimepredict")
 
 # Actions artifact indirmek için token gerekir
 GITHUB_TOKEN = st.secrets.get("github_token", os.environ.get("GITHUB_TOKEN", ""))
