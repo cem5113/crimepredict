@@ -1,19 +1,29 @@
+# --- app.py (baş kısım) ---------------------------------
 import streamlit as st
 import pandas as pd
 import numpy as np
 import folium
 from streamlit_folium import st_folium
 from datetime import datetime
+import os, sys
 
-# --- Config: components/config.py varsa kullan; yoksa sabitleri burada tanımla ---
+# 1) components/ yolu mevcutsa ekle (farklı dizin düzenlerinde yardımcı olur)
+_here = os.path.dirname(os.path.abspath(__file__))
+components_dir = os.path.join(_here, "components")
+if os.path.isdir(components_dir) and components_dir not in sys.path:
+    sys.path.append(components_dir)
+
+# 2) config'i koşullu içe aktar: yoksa varsayılanları kullan
 try:
-    # DİKKAT: SONUNDA HİÇBİR KARAKTER OLMAYACAK (özellikle 'ü' yok!)
-    from components.config import APP_NAME, APP_ROLE, DATA_REPO, DATA_BRANCH  # noqa: F401
+    # DİKKAT: Satırda fazladan karakter yok (özellikle 'ü' vs.)
+    from components.config import APP_NAME, APP_ROLE, DATA_REPO, DATA_BRANCH  # type: ignore
 except Exception:
     APP_NAME = "Crime Prediction Dashboard"
     APP_ROLE = "Kolluk Kuvvetleri için Suç Tahmini"
     DATA_REPO = "cem5113/crime_prediction_data"
     DATA_BRANCH = "main"
+    st.sidebar.info("⚙️ components/config.py bulunamadı. Varsayılan yapılandırma kullanılıyor.")
+# ---------------------------------------------------------
 
 # --- 1) Veri yükleme ---
 # Kaynaklar:
