@@ -3,9 +3,10 @@ from __future__ import annotations
 import io, os, zipfile, json, time
 from pathlib import Path
 from typing import Optional
+from components.config import DATA_REPO, DATA_BRANCH, RAW_BASE
+import os
 import requests
 import streamlit as st
-from components.config import DATA_REPO, DATA_BRANCH, GH_TOKEN, RAW_BASE
 
 # ---- Basit RAW okuma (public dosyalar) ----
 def raw_url(path: str) -> str:
