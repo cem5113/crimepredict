@@ -131,10 +131,10 @@ def classify_quantiles(daily_df: pd.DataFrame, day: date) -> pd.DataFrame:
     q25, q50, q75 = one["risk_score_daily"].quantile([0.25, 0.5, 0.75]).tolist()
 
     def lab(x: float) -> str:
-        if x <= q25: return "low"
-        elif x <= q50: return "medium"
-        elif x <= q75: return "high"
-        return "critical"
+        if x <= q25: return "düşük riskli"
+        elif x <= q50: return "orta riskli"
+        elif x <= q75: return "riskli"
+        return "yüksek riskli"
 
     one["risk_level"] = one["risk_score_daily"].apply(lab)
     one["q25"], one["q50"], one["q75"] = q25, q50, q75
@@ -219,7 +219,8 @@ def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
         if key and key in dmap.index:
             val = float(dmap.loc[key, "risk_score_daily"])
             props["risk_score_daily"] = val
-            props["risk_score_txt"] = f"{val:.4f}"
+            disp = min(val, 0.999) 
+            props["risk_score_txt"] = f"{disp:.3f}"
             if abs(val) <= EPS: lvl = "zero"
             elif val <= q25:   lvl = "low"
             elif val <= q50:   lvl = "medium"
