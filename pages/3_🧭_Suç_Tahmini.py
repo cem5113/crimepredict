@@ -623,35 +623,76 @@ all_geoids = sorted(df_events["geoid"].dropna().unique().tolist())
 # ---------- Sidebar Filtreleri ----------
 st.sidebar.header("Filtreler")
 sel_cats = st.sidebar.multiselect("Suç kategorileri", options=all_categories, default=[])
-sel_geoids = st.sidebar.multiselect("GEOID seçimi", options=all_geoids[:5000], default=[], help="Arama kutusunu kullanarak GEOID filtreleyin")
+sel_geoids = st.sidebar.multiselect(
+    "GEOID seçimi",
+    options=all_geoids[:5000],
+    default=[],
+    help="Arama kutusunu kullanarak GEOID filtreleyin"
+)
 
-min_dt = df_events["datetime"].min()
-max_dt = df_events["datetime"].max()
+# --- Güvenli min/max datetime ---
+dt_series = pd.to_datetime(df_events["datetime"], errors="coerce")
+min_dt_raw = dt_series.min()
+max_dt_raw = dt_series.max()
+
+# Eğer veri NaT ise bugünün tarihi ile güvenli fallback oluştur
+today_date = datetime.utcnow().date()
+safe_min_date = (min_dt_raw.date() if pd.notna(min_dt_raw) else today_date)
+safe_max_date = (max_dt_raw.date() if pd.notna(max_dt_raw) else today_date)
+
+# --- Tarih girişleri ---
 col1, col2 = st.sidebar.columns(2)
 with col1:
-    start_date = st.date_input("Başlangıç tarihi (profil için)", value=(max_dt.date() - timedelta(days=90)), min_value=min_dt.date(), max_value=max_dt.date())
+    default_start_date = safe_max_date - timedelta(days=90)
+    if default_start_date < safe_min_date:
+        default_start_date = safe_min_date
+    start_date = st.date_input(
+        "Başlangıç tarihi (profil için)",
+        value=default_start_date,
+        min_value=safe_min_date,
+        max_value=safe_max_date,
+    )
 with col2:
-    halflife = st.number_input("Yarı-ömür (gün)", min_value=3.0, max_value=60.0, value=14.0, step=1.0, help="Recency ağırlığı")
+    halflife = st.number_input(
+        "Yarı-ömür (gün)",
+        min_value=3.0, max_value=60.0, value=14.0, step=1.0,
+        help="Recency ağırlığı"
+    )
 
 horizon = st.sidebar.select_slider("Horizon (saat)", options=[24, 48, 72, 168], value=24)
-fc_start = st.sidebar.datetime_input("Forecast başlangıcı", value=datetime.combine(max_dt.date(), datetime.min.time()), help="Varsayılan: veri son gününün 00:00")
+
+# Forecast başlangıcı için güvenli varsayılan (verinin son gününün 00:00'ı)
+fc_start_default = datetime.combine(safe_max_date, datetime.min.time())
+fc_start = st.sidebar.datetime_input(
+    "Forecast başlangıcı",
+    value=fc_start_default,
+    help="Varsayılan: veri son gününün 00:00"
+)
 
 # Nowcast düzeltmesi ayarları
 st.sidebar.header("Nowcast düzeltmesi")
-use_nowcast = st.sidebar.checkbox("Stacking/nowcast skorlarıyla düzelt", value=True,
-                                  help="Saatlik stacking risk skorları varsa forecast olasılıklarını hafifçe ayarlar.")
-alpha = st.sidebar.slider("Forecast ağırlığı (α)", 0.0, 1.0, 0.7, 0.05,
-                          help="0=yalnız nowcast, 1=yalnız forecast. Öneri: 0.6–0.8")
+use_nowcast = st.sidebar.checkbox(
+    "Stacking/nowcast skorlarıyla düzelt",
+    value=True,
+    help="Saatlik stacking risk skorları varsa forecast olasılıklarını hafifçe ayarlar."
+)
+alpha = st.sidebar.slider(
+    "Forecast ağırlığı (α)", 0.0, 1.0, 0.7, 0.05,
+    help="0=yalnız nowcast, 1=yalnız forecast. Öneri: 0.6–0.8"
+)
 
-# Alt filtreler
+# Alt filtreler (seçim sonrası veri daraltma)
 if sel_cats:
     df_events = df_events[df_events["category"].isin(sel_cats)]
 if sel_geoids:
     df_events = df_events[df_events["geoid"].isin(sel_geoids)]
 
 # Profili üret
-last_n_days = (max_dt.date() - start_date).days if start_date else 90
-profile = build_hourly_profile(df_events, last_n_days=last_n_days, halflife_days=float(halflife), use_y_label=True)
+last_n_days = (safe_max_date - start_date).days if start_date else 90
+profile = build_hourly_profile(
+    df_events, last_n_days=last_n_days,
+    halflife_days=float(halflife), use_y_label=True
+)
 
 if profile.empty:
     st.warning("Profil üretilemedi. Filtreleri gevşetin veya veri kaynağını kontrol edin.")
@@ -663,7 +704,6 @@ fc = forecast_next_hours(profile, start_dt=fc_start, horizon_h=int(horizon))
 # ---------- Nowcast ile harmanlama ----------
 if use_nowcast and not df_nowcast.empty:
     tmp = df_nowcast.copy()
-    # kategori alanı var mı?
     cat_col = next((c for c in ("category","cat","type","crime_category") if c in tmp.columns), None)
     score_col = next((c for c in ("score","risk_score","prob","p","y_pred","prediction","stacking_prob") if c in tmp.columns), None)
     if score_col is None:
@@ -672,22 +712,21 @@ if use_nowcast and not df_nowcast.empty:
 
     if score_col:
         if cat_col is None:
-            # geoid×hour bazlı normalize et (min-max)
             tmp["nowcast_norm"] = tmp.groupby(["geoid","hour"])[score_col].transform(
                 lambda s: 0.0 if s.max()==s.min() else (s - s.min())/(s.max()-s.min())
             ).fillna(0.0)
             fc = fc.merge(tmp[["geoid","hour","nowcast_norm"]].drop_duplicates(), on=["geoid","hour"], how="left")
-            med = 0.0 if fc["nowcast_norm"].isna().all() else fc["nowcast_norm"].median(skipna=True)
-            fc["nowcast_norm"] = fc["nowcast_norm"].fillna(0.0 if np.isnan(med) else med)
         else:
             tmp = tmp.rename(columns={cat_col:"category"})
             tmp["nowcast_norm"] = tmp.groupby(["geoid","category","hour"])[score_col].transform(
                 lambda s: 0.0 if s.max()==s.min() else (s - s.min())/(s.max()-s.min())
             ).fillna(0.0)
-            fc = fc.merge(tmp[["geoid","category","hour","nowcast_norm"]].drop_duplicates(),
-                          on=["geoid","category","hour"], how="left")
-            med = 0.0 if fc["nowcast_norm"].isna().all() else fc["nowcast_norm"].median(skipna=True)
-            fc["nowcast_norm"] = fc["nowcast_norm"].fillna(0.0 if np.isnan(med) else med)
+            fc = fc.merge(
+                tmp[["geoid","category","hour","nowcast_norm"]].drop_duplicates(),
+                on=["geoid","category","hour"], how="left"
+            )
+        med = 0.0 if fc["nowcast_norm"].isna().all() else fc["nowcast_norm"].median(skipna=True)
+        fc["nowcast_norm"] = fc["nowcast_norm"].fillna(0.0 if np.isnan(med) else med)
         fc["prob_adj"] = alpha*fc["prob"] + (1-alpha)*fc["nowcast_norm"]
     else:
         fc["prob_adj"] = fc["prob"]
