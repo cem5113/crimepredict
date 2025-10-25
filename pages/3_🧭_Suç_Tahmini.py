@@ -46,7 +46,7 @@ ARTIFACT_RISK = cfg.get("artifact_name", "sf-crime-parquet")
 EXPECTED_RISK_PARQUET = "risk_hourly.parquet"  # opsiyonel
 
 OWNER_FR = cfg.get("fr_owner", OWNER_MAIN)
-REPO_FR = cfg.get("fr_repo", "fr-crime-pipeline-output")
+REPO_FR = cfg.get("fr_repo", REPO_MAIN)  # ✅ FR artifact bu repoda üretildiği için
 ARTIFACT_FR = cfg.get("fr_artifact", "fr-crime-pipeline-output")
 EXPECTED_FR_PARQUET = cfg.get("fr_file", "fr_crime_09.parquet")
 
@@ -77,13 +77,15 @@ def gh_headers() -> dict:
     return hdrs
 
 @st.cache_data(show_spinner=True, ttl=15*60)
-def fetch_latest_artifact_zip(owner: str, repo: str) -> bytes:
+def fetch_latest_artifact_zip(owner: str, repo: str, artifact_name: str | None = None) -> bytes:
     base = f"https://api.github.com/repos/{owner}/{repo}/actions/artifacts"
     r = requests.get(base, headers=gh_headers(), timeout=30)
     r.raise_for_status()
     items = r.json().get("artifacts", [])
-    # En güncel ve süresi geçmemiş olanı seç
+    # En güncel ve süresi geçmemiş olanı seç; isim filtrelemesi opsiyonel
     cand = [a for a in items if not a.get("expired", False)]
+    if artifact_name:
+        cand = [a for a in cand if a.get("name") == artifact_name]
     if not cand:
         raise FileNotFoundError("Uygun artifact bulunamadı.")
     cand.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
@@ -95,8 +97,8 @@ def fetch_latest_artifact_zip(owner: str, repo: str) -> bytes:
     return r2.content
 
 @st.cache_data(show_spinner=True, ttl=15*60)
-def read_parquet_from_artifact(owner: str, repo: str, wanted_suffix: str) -> pd.DataFrame:
-    zip_bytes = fetch_latest_artifact_zip(owner, repo)
+def read_parquet_from_artifact(owner: str, repo: str, wanted_suffix: str, artifact_name: str | None = None) -> pd.DataFrame:
+    zip_bytes = fetch_latest_artifact_zip(owner, repo, artifact_name)
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         memlist = zf.namelist()
         matches = [n for n in memlist if n.endswith("/" + wanted_suffix) or n.endswith(wanted_suffix)]
@@ -120,7 +122,7 @@ def fetch_geojson_smart(path_local: str, path_in_zip: str, raw_owner: str, raw_r
         pass
     # 2) risk artifact içinde olabilir
     try:
-        zip_bytes = fetch_latest_artifact_zip(OWNER_MAIN, REPO_MAIN)
+        zip_bytes = fetch_latest_artifact_zip(OWNER_MAIN, REPO_MAIN, ARTIFACT_RISK)
         with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
             memlist = zf.namelist()
             candidates = [n for n in memlist if n.endswith("/" + path_in_zip) or n.endswith(path_in_zip)]
@@ -401,14 +403,14 @@ if not TOKEN:
 
 # ---------- Veri yükleme ----------
 try:
-    df_events = read_parquet_from_artifact(OWNER_FR, REPO_FR, EXPECTED_FR_PARQUET)
+    df_events = read_parquet_from_artifact(OWNER_FR, REPO_FR, EXPECTED_FR_PARQUET, ARTIFACT_FR)
 except Exception as e:
     st.error(f"Olay verisi (fr_crime_09.parquet) okunamadı: {e}")
     st.stop()
 
 # Opsiyonel risk dosyası (genel renk için)
 try:
-    df_risk = read_parquet_from_artifact(OWNER_MAIN, REPO_MAIN, EXPECTED_RISK_PARQUET)
+    df_risk = read_parquet_from_artifact(OWNER_MAIN, REPO_MAIN, EXPECTED_RISK_PARQUET, ARTIFACT_RISK)
     # günlük ortalama
     if not df_risk.empty:
         cols = [c.lower().strip() for c in df_risk.columns]
