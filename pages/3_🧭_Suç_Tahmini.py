@@ -10,14 +10,9 @@ from streamlit_folium import st_folium
 
 @st.cache_data
 def load_data():
-    """Veriyi sağlam şekilde yükler.
-    1) Önce doğrudan CSV yolunu dener (eğer repo içinde açık klasör varsa)
-    2) Olmazsa ZIP'i indirip içinden dosyayı okur (artefact yapısı için güvenli yol)
-    """
-    import io, zipfile, requests
+    import io, zipfile, requests, pandas as pd
 
-    # --- Kaynak tanımları ---
-        RAW_FR_CSV = (
+    RAW_FR_CSV = (
         "https://github.com/cem5113/crime_prediction_data/raw/main/"
         "artifact/fr-crime-pipeline-output/fr_crime_09.csv"
     )
@@ -26,43 +21,38 @@ def load_data():
         "artifact/sf-crime-pipeline-output/metrics_stacking_ohe.csv"
     )
 
-    # A) Repo içi klasör yapısı (varsa)
+    # Repo içi ZIP dosyaları
     ZIP_FR_RAW = "https://github.com/cem5113/crime_prediction_data/raw/main/artifact/fr-crime-pipeline-output.zip"
     ZIP_SF_RAW = "https://github.com/cem5113/crime_prediction_data/raw/main/artifact/sf-crime-pipeline-output.zip"
-    
-    # B) Releases üzerinden indirme (asset olarak yüklenmişse)
+
+    # Releases ZIP dosyaları
     ZIP_FR_REL = "https://github.com/cem5113/crime_prediction_data/releases/latest/download/fr-crime-pipeline-output.zip"
     ZIP_SF_REL = "https://github.com/cem5113/crime_prediction_data/releases/latest/download/sf-crime-pipeline-output.zip"
 
-        # CSV okuma dene
+    # ↓ CSV’yi veya ZIP’ten içeriği oku ↓
     df = None
     metrics = None
-    # ---- fr_crime_09.csv ----
+
     try:
         df = pd.read_csv(RAW_FR_CSV)
     except Exception:
-        # ZIP (repo içi raw) dene
         for url in [ZIP_FR_RAW, ZIP_FR_REL]:
             try:
                 r = requests.get(url, timeout=60)
                 r.raise_for_status()
                 with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
-                    member = None
                     for name in zf.namelist():
                         if name.endswith("fr_crime_09.csv"):
-                            member = name
+                            with zf.open(name) as f:
+                                df = pd.read_csv(f)
                             break
-                    if member is None:
-                        continue
-                    with zf.open(member) as f:
-                        df = pd.read_csv(f)
-                        break
+                if df is not None:
+                    break
             except Exception:
                 pass
         if df is None:
-            raise FileNotFoundError("fr_crime_09.csv indirilemedi. Lütfen dosyanın Releases altında 'fr-crime-pipeline-output.zip' olarak yüklü olduğundan emin olun.")
+            raise FileNotFoundError("fr_crime_09.csv bulunamadı")
 
-    # ---- metrics_stacking_ohe.csv ----
     try:
         metrics = pd.read_csv(RAW_METRICS_CSV)
     except Exception:
@@ -71,20 +61,17 @@ def load_data():
                 r = requests.get(url, timeout=60)
                 r.raise_for_status()
                 with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
-                    member = None
                     for name in zf.namelist():
                         if name.endswith("metrics_stacking_ohe.csv"):
-                            member = name
+                            with zf.open(name) as f:
+                                metrics = pd.read_csv(f)
                             break
-                    if member is None:
-                        continue
-                    with zf.open(member) as f:
-                        metrics = pd.read_csv(f)
-                        break
+                if metrics is not None:
+                    break
             except Exception:
                 pass
         if metrics is None:
-            raise FileNotFoundError("metrics_stacking_ohe.csv indirilemedi. Lütfen dosyanın Releases altında 'sf-crime-pipeline-output.zip' olarak yüklü olduğundan emin olun.")
+            raise FileNotFoundError("metrics_stacking_ohe.csv bulunamadı")
 
     return df, metrics
 
