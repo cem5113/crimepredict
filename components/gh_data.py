@@ -15,8 +15,9 @@ def raw_url(path: str) -> str:
 # ---- GitHub REST helper ----
 def _gh_headers():
     h = {"Accept": "application/vnd.github+json"}
-    if GH_TOKEN:
-        h["Authorization"] = f"Bearer {GH_TOKEN}"
+    tok = os.getenv("GITHUB_TOKEN") or st.secrets.get("GH_TOKEN", None)
+    if tok:
+        h["Authorization"] = f"Bearer {tok}"
     return h
 
 # ---- Releases -> asset indirme (isme göre, en yeni) ----
