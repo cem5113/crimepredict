@@ -10,7 +10,7 @@ import pydeck as pdk
 import requests
 
 from components.last_update import show_last_update_badge
-from components.utils import MODEL_VERSION, MODEL_LAST_TRAIN
+from components.meta import MODEL_VERSION, MODEL_LAST_TRAIN
 
 # =========================
 # Ayarlar
