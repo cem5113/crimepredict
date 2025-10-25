@@ -261,18 +261,6 @@ def make_map(geojson_enriched: dict):
         tooltip=tooltip,
     )
     st.pydeck_chart(deck, use_container_width=True)
-    st.markdown(
-        """
-        <div style="display:flex;gap:12px;flex-wrap:wrap;font-size:14px;">
-          <div><span style="display:inline-block;width:14px;height:14px;background:#C8C8C8;border:1px solid #666;"></span> zero</div>
-          <div><span style="display:inline-block;width:14px;height:14px;background:rgb(56,168,0);border:1px solid #666;"></span> low</div>
-          <div><span style="display:inline-block;width:14px;height:14px;background:rgb(255,221,0);border:1px solid #666;"></span> medium</div>
-          <div><span style="display:inline-block;width:14px;height:14px;background:rgb(255,140,0);border:1px solid #666;"></span> high</div>
-          <div><span style="display:inline-block;width:14px;height:14px;background:rgb(204,0,0);border:1px solid #666;"></span> critical</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
 
 # ── UI
 TOKEN = resolve_github_token()
