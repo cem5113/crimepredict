@@ -302,11 +302,6 @@ if not one_day.empty:
 
     st.markdown(
         f"""
-        <div style="font-size:15px; font-style:italic; color:#444;">
-            Şehir alanları, günlük risk skorlarına göre <b>dört seviyeye</b> ayrılmıştır.<br>
-            Risk seviyelerinin yanındaki yüzdeler, <b>önümüzdeki 24 saat içinde ilgili GEOID bölgesinde suç gerçekleşme olasılığını</b> temsil eder.
-        </div>
-    
         <div style="font-size:17px; margin-top:10px; line-height:1.6;">
             🟢 <b>Düşük Riskli:</b> &lt; %{q25:.2f}<br>
             🟡 <b>Orta Riskli:</b> &gt; %{q25:.2f}<br>
@@ -315,7 +310,7 @@ if not one_day.empty:
         </div>
     
         <div style="font-size:13px; font-style:italic; color:#666; margin-top:8px;">
-            Bu sınıflandırma, alanları dört risk seviyesine ayırmak için belirlenen sabit eşiklere dayanmaktadır.
+            Şehir alanları, günlük risk skorlarına göre <b>dört seviyeye</b> ayrılmıştır.<br> Bu sınıflandırma, alanları dört risk seviyesine ayırmak için belirlenen sabit eşiklere dayanmaktadır.
         </div>
         """,
         unsafe_allow_html=True
