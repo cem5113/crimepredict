@@ -195,13 +195,12 @@ def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
     EPS = 1e-12
 
     COLOR_MAP = {
-        "zero": [200, 200, 200],
-        "low": [56, 168, 0],
-        "medium": [255, 221, 0],
-        "high": [255, 140, 0],
-        "critical": [204, 0, 0],
+        "çok düşük riskli": [200, 200, 200], 
+        "düşük riskli":     [56, 168, 0],     
+        "orta riskli":      [255, 221, 0],    
+        "riskli":           [255, 140, 0],    
+        "yüksek riskli":    [204, 0, 0],     
     }
-
     out = []
     for feat in feats:
         props = (feat.get("properties") or {}).copy()
@@ -229,7 +228,7 @@ def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
             enriched += 1
 
         if lvl is None:
-            lvl = props.get("risk_level", "zero")
+            lvl = props.get("risk_level", "çok düşük riskli")
         props["risk_level"] = lvl
         props["fill_color"] = COLOR_MAP.get(lvl, [220, 220, 220])
 
