@@ -210,53 +210,6 @@ def read_json_from_artifact(owner: str, repo: str, wanted_suffix: str, artifact_
         with zf.open(matches[0]) as f:
             return json.load(io.TextIOWrapper(f, encoding="utf-8"))
 
-@st.cache_data(show_spinner=True, ttl=15*60)
-def read_parquet_from_artifact(owner: str, repo: str, wanted_suffix: str, artifact_name: str | None = None) -> pd.DataFrame:
-    zip_bytes = fetch_latest_artifact_zip(owner, repo, artifact_name)
-    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        memlist = zf.namelist()
-        matches = [n for n in memlist if n.endswith("/" + wanted_suffix) or n.endswith(wanted_suffix)]
-        if not matches:
-            raise FileNotFoundError(f"Zip içinde {wanted_suffix} yok. Örnek içerik: {memlist[:15]}")
-        with zf.open(matches[0]) as f:
-            df = pd.read_parquet(f)
-    df.columns = [str(c).strip() for c in df.columns]
-    return df
-
-@st.cache_data(show_spinner=True, ttl=15*60)
-def read_parquet_from_nested_artifact(
-    owner: str,
-    repo: str,
-    inner_zip_name: str,           # 'fr_parquet_outputs.zip'
-    inner_path_in_zip: str,        # 'fr_crime_10.parquet' veya 'artifact/metrics_stacking_ohe.parquet'
-    artifact_name: str | None = None
-) -> pd.DataFrame:
-    zip_bytes = fetch_latest_artifact_zip(owner, repo, artifact_name)
-    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as outer:
-        members = outer.namelist()
-        cand = [n for n in members if n.endswith("/"+inner_zip_name) or n.endswith(inner_zip_name)]
-        if not cand:
-            raise FileNotFoundError(f"Artifact içinde {inner_zip_name} yok. İçerik örneği: {members[:20]}")
-        with outer.open(cand[0]) as inner_zip_file:
-            inner_bytes = inner_zip_file.read()
-
-    with zipfile.ZipFile(io.BytesIO(inner_bytes)) as inner:
-        inner_members = inner.namelist()
-        targets = [n for n in inner_members if n.endswith("/"+inner_path_in_zip) or n.endswith(inner_path_in_zip)]
-        if not targets:
-            raise FileNotFoundError(f"{inner_zip_name} içinde {inner_path_in_zip} yok. İçerik örneği: {inner_members[:20]}")
-        with inner.open(targets[0]) as f:
-            df = pd.read_parquet(f)
-
-    df.columns = [str(c).strip() for c in df.columns]
-    return df
-
-@st.cache_data(show_spinner=True, ttl=15*60)
-def list_zip_members(owner: str, repo: str, artifact_name: str | None = None) -> list[str]:
-    zip_bytes = fetch_latest_artifact_zip(owner, repo, artifact_name)
-    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        return zf.namelist()
-
 def _find_first_by_patterns(names: list[str], patterns: list[str]) -> str | None:
     for p in patterns:
         rx = re.compile(p)
