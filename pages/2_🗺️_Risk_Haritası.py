@@ -310,7 +310,7 @@ if not one_day.empty:
         </div>
     
         <div style="font-size:13px; font-style:italic; color:#666; margin-top:8px;">
-            Bu sınıflandırma, GEOID alanlarını dört risk seviyesine ayırmak için belirlenen günlük risk skorlarından elde edilen eşiklere dayanmaktadır.
+            Bu sınıflandırma, GEOID alanlarını dört risk seviyesine ayırmak için belirlenen günlük risk skorlarından elde edilen değişken eşiklere dayanmaktadır.
         </div>
         """,
         unsafe_allow_html=True
