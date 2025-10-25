@@ -47,7 +47,7 @@ EXPECTED_RISK_PARQUET = "risk_hourly.parquet"  # opsiyonel
 
 OWNER_FR = cfg.get("fr_owner", OWNER_MAIN)
 REPO_FR = cfg.get("fr_repo", REPO_MAIN)  # ✅ FR artifact bu repoda üretildiği için
-ARTIFACT_FR = cfg.get("fr_artifact", "fr-crime-pipeline-output")
+ARTIFACT_FR = cfg.get("fr_artifact", "fr_parquet_outputs")
 EXPECTED_FR_PARQUET = cfg.get("fr_file", "fr_crime_09.parquet")
 
 # GeoJSON
