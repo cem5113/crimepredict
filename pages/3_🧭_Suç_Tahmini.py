@@ -40,15 +40,23 @@ st.caption("5 yıllık tarihsel desenlere dayalı hızlı forecast ve görsel ö
 # ---------- Konfig ----------
 cfg = st.secrets if hasattr(st, "secrets") else {}
 # Artifacts
+# --- Ana artifact (risk) bilgileri ---
 OWNER_MAIN = cfg.get("artifact_owner", "cem5113")
-REPO_MAIN = cfg.get("artifact_repo", "crime_prediction_data")
+REPO_MAIN  = cfg.get("artifact_repo",  "crime_prediction_data")
 ARTIFACT_RISK = cfg.get("artifact_name", "sf-crime-parquet")
-EXPECTED_RISK_PARQUET = "risk_hourly.parquet"  # opsiyonel
+EXPECTED_RISK_PARQUET = cfg.get("risk_file", "risk_hourly.parquet")  # opsiyonel
 
-OWNER_FR = cfg.get("fr_owner", OWNER_MAIN)
-REPO_FR = cfg.get("fr_repo", REPO_MAIN)  # ✅ FR artifact bu repoda üretildiği için
+# --- FR artifact bilgileri (ZIP ve iç yollar) ---
+OWNER_FR   = cfg.get("fr_owner", OWNER_MAIN)
+REPO_FR    = cfg.get("fr_repo",  REPO_MAIN)             # FR artifact bu repoda
 ARTIFACT_FR = cfg.get("fr_artifact", "fr-crime-outputs-parquet")
+
+# ZIP dosyasının adı (artifact içeriği)
+FR_ZIP_NAME = cfg.get("fr_zip_name", "fr_parquet_outputs.zip")
+
+# ZIP içindeki dosya yolları (inner paths)
 EXPECTED_FR_PARQUET = cfg.get("fr_file", "fr_crime_10.parquet")
+EXPECTED_METRICS_OHE = cfg.get("fr_metrics_file", "artifact/metrics_stacking_ohe.parquet")
 
 # GeoJSON
 GEOJSON_PATH_LOCAL_DEFAULT = cfg.get("geojson_path", "data/sf_cells.geojson")
@@ -56,6 +64,24 @@ RAW_GEOJSON_OWNER = cfg.get("geojson_owner", "cem5113")
 RAW_GEOJSON_REPO = cfg.get("geojson_repo", "crimepredict")
 
 # ---------- Yardımcılar: Token & GitHub ----------
+def fr_locator_for(inner_path: str) -> dict:
+    """
+    FR artifact içindeki bir dosyayı bulmak için gerekli tüm bilgileri döndürür.
+    inner_path: ZIP içindeki görece yol (örn. 'fr_crime_10.parquet' ya da 'artifact/metrics_stacking_ohe.parquet')
+    """
+    return {
+        "owner": OWNER_FR,                      # 'cem5113'
+        "repo": REPO_FR,                        # 'crime_prediction_data'
+        "artifact": ARTIFACT_FR,                # 'fr-crime-outputs-parquet'
+        "zip_name": FR_ZIP_NAME,                # 'fr_parquet_outputs.zip'
+        "inner_path": inner_path,               # 'fr_crime_10.parquet' veya 'artifact/metrics_stacking_ohe.parquet'
+        # Tam mantıksal yol (okunabilirlik için)
+        "logical_path": f"{OWNER_FR}/{REPO_FR}/{ARTIFACT_FR}/{FR_ZIP_NAME}/{inner_path}"
+    }
+
+FR_CRIME_10 = fr_locator_for(EXPECTED_FR_PARQUET)
+METRICS_STACKING_OHE = fr_locator_for(EXPECTED_METRICS_OHE)
+
 def resolve_github_token() -> str | None:
     tok = os.getenv("GITHUB_TOKEN")
     if tok:
@@ -78,6 +104,10 @@ def gh_headers() -> dict:
 
 @st.cache_data(show_spinner=True, ttl=15*60)
 def fetch_latest_artifact_zip(owner: str, repo: str, artifact_name: str | None = None) -> bytes:
+    """
+    İlgili repodaki en güncel (expire olmamış) artifact'ı indirir ve ZIP bytes döner.
+    artifact_name verilirse sadece adı eşleşenler arasından seçer.
+    """
     base = f"https://api.github.com/repos/{owner}/{repo}/actions/artifacts"
     r = requests.get(base, headers=gh_headers(), timeout=30)
     r.raise_for_status()
@@ -90,21 +120,76 @@ def fetch_latest_artifact_zip(owner: str, repo: str, artifact_name: str | None =
     cand.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
     url = cand[0].get("archive_download_url")
     if not url:
-        raise RuntimeError("archive_download_url yok")
+        raise RuntimeError("archive_download_url yok.")
     r2 = requests.get(url, headers=gh_headers(), timeout=60)
     r2.raise_for_status()
     return r2.content
 
+# --- ÖNEMLİ DÜZELTME: İç ZIP'leri otomatik bulan genel okuyucu ---
 @st.cache_data(show_spinner=True, ttl=15*60)
 def read_parquet_from_artifact(owner: str, repo: str, wanted_suffix: str, artifact_name: str | None = None) -> pd.DataFrame:
+    """
+    Artifact ZIP'inde aranan dosya son eki (wanted_suffix) ile eşleşen Parquet'i okur.
+    Eğer artifact içinde bir veya daha fazla *iç ZIP* varsa (örn. fr_parquet_outputs.zip),
+    bunların içine de bakar ve eşleşeni bulursa okur.
+    """
     zip_bytes = fetch_latest_artifact_zip(owner, repo, artifact_name)
-    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        memlist = zf.namelist()
-        matches = [n for n in memlist if n.endswith("/" + wanted_suffix) or n.endswith(wanted_suffix)]
-        if not matches:
-            raise FileNotFoundError(f"Zip içinde {wanted_suffix} yok. Örnek içerik: {memlist[:15]}")
-        with zf.open(matches[0]) as f:
+
+    def _read_from_zip(zb: bytes) -> pd.DataFrame | None:
+        with zipfile.ZipFile(io.BytesIO(zb)) as zf:
+            memlist = zf.namelist()
+            # 1) Doğrudan dosyayı ara
+            matches = [n for n in memlist if n.endswith("/"+wanted_suffix) or n.endswith(wanted_suffix)]
+            if matches:
+                with zf.open(matches[0]) as f:
+                    df = pd.read_parquet(f)
+                df.columns = [str(c).strip() for c in df.columns]
+                return df
+            # 2) İç ZIP varsa, içine dal (örn. fr_parquet_outputs.zip)
+            inner_zips = [n for n in memlist if n.lower().endswith(".zip")]
+            for iz in inner_zips:
+                with zf.open(iz) as f:
+                    inner_bytes = f.read()
+                try:
+                    df = _read_from_zip(inner_bytes)
+                    if df is not None:
+                        return df
+                except Exception:
+                    pass
+        return None
+
+    df = _read_from_zip(zip_bytes)
+    if df is None:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            raise FileNotFoundError(f"Zip içinde {wanted_suffix} yok. Örnek içerik: {zf.namelist()[:20]}")
+    return df
+
+# --- İsteğe bağlı: İç ZIP adı + iç yol biliniyorsa doğrudan okuyucu ---
+@st.cache_data(show_spinner=True, ttl=15*60)
+def read_parquet_from_nested_artifact(
+    owner: str,
+    repo: str,
+    inner_zip_name: str,           # örn. 'fr_parquet_outputs.zip'
+    inner_path_in_zip: str,        # örn. 'fr_crime_10.parquet'
+    artifact_name: str | None = None
+) -> pd.DataFrame:
+    zip_bytes = fetch_latest_artifact_zip(owner, repo, artifact_name)
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as outer:
+        members = outer.namelist()
+        cand = [n for n in members if n.endswith("/"+inner_zip_name) or n.endswith(inner_zip_name)]
+        if not cand:
+            raise FileNotFoundError(f"Artifact içinde {inner_zip_name} yok. İçerik örneği: {members[:20]}")
+        with outer.open(cand[0]) as inner_zip_file:
+            inner_bytes = inner_zip_file.read()
+
+    with zipfile.ZipFile(io.BytesIO(inner_bytes)) as inner:
+        inner_members = inner.namelist()
+        targets = [n for n in inner_members if n.endswith("/"+inner_path_in_zip) or n.endswith(inner_path_in_zip)]
+        if not targets:
+            raise FileNotFoundError(f"{inner_zip_name} içinde {inner_path_in_zip} yok. İçerik örneği: {inner_members[:20]}")
+        with inner.open(targets[0]) as f:
             df = pd.read_parquet(f)
+
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
@@ -124,6 +209,53 @@ def read_json_from_artifact(owner: str, repo: str, wanted_suffix: str, artifact_
             raise FileNotFoundError(f"Zip içinde {wanted_suffix} yok.")
         with zf.open(matches[0]) as f:
             return json.load(io.TextIOWrapper(f, encoding="utf-8"))
+
+@st.cache_data(show_spinner=True, ttl=15*60)
+def read_parquet_from_artifact(owner: str, repo: str, wanted_suffix: str, artifact_name: str | None = None) -> pd.DataFrame:
+    zip_bytes = fetch_latest_artifact_zip(owner, repo, artifact_name)
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        memlist = zf.namelist()
+        matches = [n for n in memlist if n.endswith("/" + wanted_suffix) or n.endswith(wanted_suffix)]
+        if not matches:
+            raise FileNotFoundError(f"Zip içinde {wanted_suffix} yok. Örnek içerik: {memlist[:15]}")
+        with zf.open(matches[0]) as f:
+            df = pd.read_parquet(f)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+@st.cache_data(show_spinner=True, ttl=15*60)
+def read_parquet_from_nested_artifact(
+    owner: str,
+    repo: str,
+    inner_zip_name: str,           # 'fr_parquet_outputs.zip'
+    inner_path_in_zip: str,        # 'fr_crime_10.parquet' veya 'artifact/metrics_stacking_ohe.parquet'
+    artifact_name: str | None = None
+) -> pd.DataFrame:
+    zip_bytes = fetch_latest_artifact_zip(owner, repo, artifact_name)
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as outer:
+        members = outer.namelist()
+        cand = [n for n in members if n.endswith("/"+inner_zip_name) or n.endswith(inner_zip_name)]
+        if not cand:
+            raise FileNotFoundError(f"Artifact içinde {inner_zip_name} yok. İçerik örneği: {members[:20]}")
+        with outer.open(cand[0]) as inner_zip_file:
+            inner_bytes = inner_zip_file.read()
+
+    with zipfile.ZipFile(io.BytesIO(inner_bytes)) as inner:
+        inner_members = inner.namelist()
+        targets = [n for n in inner_members if n.endswith("/"+inner_path_in_zip) or n.endswith(inner_path_in_zip)]
+        if not targets:
+            raise FileNotFoundError(f"{inner_zip_name} içinde {inner_path_in_zip} yok. İçerik örneği: {inner_members[:20]}")
+        with inner.open(targets[0]) as f:
+            df = pd.read_parquet(f)
+
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+@st.cache_data(show_spinner=True, ttl=15*60)
+def list_zip_members(owner: str, repo: str, artifact_name: str | None = None) -> list[str]:
+    zip_bytes = fetch_latest_artifact_zip(owner, repo, artifact_name)
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        return zf.namelist()
 
 def _find_first_by_patterns(names: list[str], patterns: list[str]) -> str | None:
     for p in patterns:
@@ -388,10 +520,12 @@ refresh = st.sidebar.button("Veriyi Yenile (artifact'ları tazele)")
 if refresh:
     fetch_latest_artifact_zip.clear()
     read_parquet_from_artifact.clear()
+    read_parquet_from_nested_artifact.clear()
     fetch_geojson_smart.clear()
     build_hourly_profile.clear()
     forecast_next_hours.clear()
     summarize_top3.clear()
+
 
 if not TOKEN:
     st.error("GitHub token yok. `st.secrets['github_token']` veya GITHUB_TOKEN env ayarlayın.")
@@ -399,7 +533,22 @@ if not TOKEN:
 
 # ---------- Veri yükleme ----------
 try:
-    df_events = read_parquet_from_artifact(OWNER_FR, REPO_FR, EXPECTED_FR_PARQUET, ARTIFACT_FR)
+    df_metrics_ohe = read_parquet_from_nested_artifact(
+        OWNER_FR, REPO_FR,
+        inner_zip_name=FR_ZIP_NAME,
+        inner_path_in_zip=EXPECTED_METRICS_OHE,  # 'artifact/metrics_stacking_ohe.parquet'
+        artifact_name=ARTIFACT_FR
+    )
+except Exception:
+    df_metrics_ohe = pd.DataFrame()
+
+try:
+    df_events = read_parquet_from_nested_artifact(
+        OWNER_FR, REPO_FR,
+        inner_zip_name=FR_ZIP_NAME,              # 'fr_parquet_outputs.zip'
+        inner_path_in_zip=EXPECTED_FR_PARQUET,   # 'fr_crime_10.parquet'
+        artifact_name=ARTIFACT_FR                # 'fr-crime-outputs-parquet'
+    )
 except Exception as e:
     st.error(f"Olay verisi ({EXPECTED_FR_PARQUET}) okunamadı: {e}")
     st.stop()
