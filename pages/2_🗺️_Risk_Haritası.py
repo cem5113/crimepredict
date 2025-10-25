@@ -9,7 +9,11 @@ from components.last_update import show_last_update_badge
 from components.meta import MODEL_VERSION, MODEL_LAST_TRAIN
 
 st.set_page_config(page_title="🗺️ Risk Haritası (Günlük)", layout="wide")
-st.title("Suç Risk Haritası — Günlük Ortalama (low / medium / high / critical)")
+st.title("🕒 Anlık Suç Risk Haritası")
+st.markdown(
+    "<p style='font-size:14px; font-style:italic;'>Bu harita, en güncel veriler üzerinden her GEOID bazında suç gerçekleşme olasılıklarını göstermektedir.</p>",
+    unsafe_allow_html=True
+)
 
 # ── Ayarlar
 cfg = st.secrets if hasattr(st, "secrets") else {}
@@ -229,8 +233,6 @@ def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
         props["fill_color"] = COLOR_MAP.get(lvl, [220, 220, 220])
 
         out.append({**feat, "properties": props})
-
-    st.caption(f"Eşleşme özeti → DF(tract,11h): {len(dmap)} anahtar, enjekte: {enriched}/{len(feats)}")
     return {**geojson_dict, "features": out}
 
 def make_map(geojson_enriched: dict):
@@ -306,11 +308,23 @@ sel_date = st.sidebar.selectbox("Gün seçin", dates, index=len(dates) - 1, form
 one_day = classify_quantiles(risk_daily, sel_date) if sel_date else pd.DataFrame()
 
 if not one_day.empty:
-    c3 = st.container()
-    c3.metric(
-        "Çeyrekler",
-        f"Q25={one_day['q25'].iloc[0]:.4f} | Q50={one_day['q50'].iloc[0]:.4f} | Q75={one_day['q75'].iloc[0]:.4f}"
+    q25 = one_day['q25'].iloc[0] * 100
+    q50 = one_day['q50'].iloc[0] * 100
+    q75 = one_day['q75'].iloc[0] * 100
+
+    st.markdown(
+        f"""
+        <div style="font-size:16px; font-weight:600;">Risk Sınıflandırması</div>
+        <div style="font-size:14px; margin-top:4px;">
+            🟢 <b>Düşük Riskli:</b> &lt; %{q25:.2f}<br>
+            🟡 <b>Orta Riskli:</b> &gt; %{q25:.2f}<br>
+            🟠 <b>Riskli:</b> &gt; %{q50:.2f}<br>
+            🔴 <b>Yüksek Riskli:</b> &gt; %{q75:.2f}
+        </div>
+        """,
+        unsafe_allow_html=True
     )
+
     gj = fetch_geojson_smart(
         GEOJSON_PATH_LOCAL_DEFAULT,
         GEOJSON_PATH_LOCAL_DEFAULT,
