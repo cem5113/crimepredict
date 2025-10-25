@@ -11,7 +11,7 @@ from components.meta import MODEL_VERSION, MODEL_LAST_TRAIN
 st.set_page_config(page_title="🗺️ Risk Haritası (Günlük)", layout="wide")
 st.title("🕒 Anlık Suç Risk Haritası")
 st.markdown(
-    "<p style='font-size:14px; font-style:italic;'>Bu harita, en güncel veriler üzerinden her GEOID bazında suç gerçekleşme olasılıklarını göstermektedir.</p>",
+    "<p style='font-size:14px; font-style:italic;'>Bu harita, en güncel veriler üzerinden her GEOID bazında 24 saat içerisinde suç gerçekleşme olasılıklarını göstermektedir.</p>",
     unsafe_allow_html=True
 )
 
