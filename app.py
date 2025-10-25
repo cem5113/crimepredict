@@ -4,6 +4,14 @@ from __future__ import annotations
 import os
 import traceback
 import streamlit as st
+from components.config import APP_NAME
+
+st.set_page_config(
+    page_title=APP_NAME,
+    page_icon="🧭",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 # ── Proje bileşenleri
 from components.last_update import show_last_update_badge
