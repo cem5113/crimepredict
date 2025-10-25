@@ -2,7 +2,7 @@
 import os
 import streamlit as st
 
-CODE_REPO      = st.secrets.get("CODE_REPO", "cem5113/crimepredict")
+CODE_REPO      = st.secrets.get("GITHUB_REPO", "cem5113/crimepredict")
 DATA_REPO      = st.secrets.get("DATA_REPO", "cem5113/crime_prediction_data")
 DATA_BRANCH    = st.secrets.get("DATA_BRANCH", "main")
 GH_TOKEN       = st.secrets.get("GH_TOKEN", None)
