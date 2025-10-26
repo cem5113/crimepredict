@@ -187,19 +187,17 @@ def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
     )
 
     feats = geojson_dict.get("features", [])
-    enriched = 0
-
     q25 = float(df["risk_score_daily"].quantile(0.25))
     q50 = float(df["risk_score_daily"].quantile(0.50))
     q75 = float(df["risk_score_daily"].quantile(0.75))
     EPS = 1e-12
 
     COLOR_MAP = {
-        "çok düşük riskli": [200, 200, 200], 
-        "düşük riskli":     [56, 168, 0],     
-        "orta riskli":      [255, 221, 0],    
-        "riskli":           [255, 140, 0],    
-        "yüksek riskli":    [204, 0, 0],     
+        "çok düşük riskli": [200, 200, 200],
+        "düşük riskli":     [56, 168, 0],
+        "orta riskli":      [255, 221, 0],
+        "riskli":           [255, 140, 0],
+        "yüksek riskli":    [204, 0, 0],
     }
     out = []
     for feat in feats:
@@ -218,14 +216,13 @@ def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
         if key and key in dmap.index:
             val = float(dmap.loc[key, "risk_score_daily"])
             props["risk_score_daily"] = val
-            disp = min(val, 0.999) 
+            disp = min(val, 0.999)
             props["risk_score_txt"] = f"{disp:.3f}"
             if abs(val) <= EPS: lvl = "çok düşük riskli"
             elif val <= q25:   lvl = "düşük riskli"
             elif val <= q50:   lvl = "orta riskli"
             elif val <= q75:   lvl = "riskli"
             else:              lvl = "yüksek riskli"
-            enriched += 1
 
         if lvl is None:
             lvl = props.get("risk_level", "çok düşük riskli")
@@ -290,11 +287,19 @@ except Exception as e:
     st.error(f"Artifact indirilemedi/okunamadı: {e}")
     st.stop()
 
+# Günlük ortalama hesapla
 risk_daily = daily_average(risk_df)
-dates = sorted(risk_daily["date"].unique())
-sel_date = st.sidebar.selectbox("Gün seçin", dates, index=len(dates) - 1, format_func=str) if dates else None
-one_day = classify_quantiles(risk_daily, sel_date) if sel_date else pd.DataFrame()
 
+# >>> GÜN SEÇİMİ KALDIRILDI: her zaman en güncel gün otomatik <<<
+if risk_daily.empty:
+    st.info("Veri bulunamadı.")
+    show_last_update_badge(data_upto=None, model_version=MODEL_VERSION, last_train=MODEL_LAST_TRAIN)
+    st.stop()
+
+latest_date = max(risk_daily["date"])
+one_day = classify_quantiles(risk_daily, latest_date)
+
+# Eşikleri göster
 if not one_day.empty:
     q25 = one_day['q25'].iloc[0] * 100
     q50 = one_day['q50'].iloc[0] * 100
@@ -302,20 +307,21 @@ if not one_day.empty:
 
     st.markdown(
         f"""
-        <div style="font-size:17px; margin-top:10px; line-height:1.6;">
+        <div style="font-size:16px; margin-top:10px; line-height:1.6;">
+            <b>Gün:</b> {latest_date}<br>
             🟢 <b>Düşük Riskli:</b> &lt; %{q25:.2f}<br>
-            🟡 <b>Orta Riskli:</b> &gt; %{q25:.2f}<br>
-            🟠 <b>Riskli:</b> &gt; %{q50:.2f}<br>
-            🔴 <b>Yüksek Riskli:</b> &gt; %{q75:.2f}
+            🟡 <b>Orta Riskli:</b> &gt;= %{q25:.2f}<br>
+            🟠 <b>Riskli:</b> &gt;= %{q50:.2f}<br>
+            🔴 <b>Yüksek Riskli:</b> &gt;= %{q75:.2f}
         </div>
-    
         <div style="font-size:13px; font-style:italic; color:#666; margin-top:8px;">
-            Bu sınıflandırma, GEOID alanlarını dört risk seviyesine ayırmak için belirlenen günlük risk skorlarından elde edilen değişken eşiklere dayanmaktadır.
+            Eşikler, en güncel güne ait dağılımdan otomatik hesaplanır (gün seçimi yoktur).
         </div>
         """,
         unsafe_allow_html=True
     )
 
+    # GeoJSON'u getir ve zenginleştir
     gj = fetch_geojson_smart(
         GEOJSON_PATH_LOCAL_DEFAULT,
         GEOJSON_PATH_LOCAL_DEFAULT,
@@ -325,6 +331,6 @@ if not one_day.empty:
     enriched = inject_properties(gj, one_day)
     make_map(enriched)
 else:
-    st.info("Seçili tarih için veri yok.")
+    st.info(f"{latest_date} için veri yok.")
 
 show_last_update_badge(data_upto=None, model_version=MODEL_VERSION, last_train=MODEL_LAST_TRAIN)
