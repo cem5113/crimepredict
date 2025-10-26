@@ -17,38 +17,43 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# ── Ayarlar
+# ── Ayarlar / varsayılanlar
 cfg = getattr(st, "secrets", {}) if hasattr(st, "secrets") else {}
-OWNER = cfg.get("artifact_owner", "cem5113")
-REPO = cfg.get("artifact_repo", "crime_prediction_data")
+# Eğer DATA_REPO verilmişse OWNER/REPO’yu oradan ayıkla
+DATA_REPO = cfg.get("DATA_REPO", os.getenv("DATA_REPO", "cem5113/crime_prediction_data"))
+DATA_BRANCH = cfg.get("DATA_BRANCH", os.getenv("DATA_BRANCH", "main"))
+if "/" in DATA_REPO:
+    OWNER, REPO = DATA_REPO.split("/", 1)
+else:
+    OWNER, REPO = cfg.get("artifact_owner", "cem5113"), cfg.get("artifact_repo", "crime_prediction_data")
+
 ARTIFACT_NAME = cfg.get("artifact_name", "sf-crime-parquet")
 EXPECTED_PARQUET = "risk_hourly.parquet"
+
+# Release fallback için (public)
+ASSET_ZIP_1 = cfg.get("ASSET_ZIP_1", os.getenv("ASSET_ZIP_1", "sf-crime-parquet.zip"))
+ASSET_DIR_1 = cfg.get("ASSET_DIR_1", os.getenv("ASSET_DIR_1", "sf-crime-parquet"))
 
 GEOJSON_PATH_LOCAL_DEFAULT = cfg.get("geojson_path", "data/sf_cells.geojson")
 RAW_GEOJSON_OWNER = cfg.get("geojson_owner", "cem5113")
 RAW_GEOJSON_REPO = cfg.get("geojson_repo", "crimepredict")
 
-# ── Token çözümleme (ENV > st.secrets [düz + iç içe])
+# ── Yardımcılar: token çözümleme, başlıklar, maskeleme
 def _secret_lookup_in_secrets(keys=("GITHUB_TOKEN", "GH_TOKEN", "github_token")) -> Optional[str]:
-    """
-    st.secrets içinde önce düz anahtarları, ardından muhtemel alt sözlükleri ('github', 'tokens', 'secrets')
-    tarar ve ilk bulunan non-empty değeri döndürür.
-    """
     try:
         sec = getattr(st, "secrets", None)
         if not sec:
             return None
 
-        # 1) Düz anahtarlar
+        # 1) düz anahtarlar
         for k in keys:
             v = sec.get(k)
             if v:
                 v = str(v).strip()
                 if v:
                     return v
-
-        # 2) İç içe olası bölümler
-        for bucket in ("github", "tokens", "secrets"):
+        # 2) olası alt sözlükler
+        for bucket in ("github", "tokens", "secrets", "config"):
             sub = sec.get(bucket)
             if isinstance(sub, dict):
                 for k in list(keys) + [k.lower() for k in keys]:
@@ -62,10 +67,6 @@ def _secret_lookup_in_secrets(keys=("GITHUB_TOKEN", "GH_TOKEN", "github_token"))
     return None
 
 def resolve_github_token() -> Optional[str]:
-    """
-    Öncelik: ENV (GITHUB_TOKEN / GH_TOKEN / github_token) → st.secrets (düz/iç içe) → None.
-    Bulunca ENV'e yazar (os.environ['GITHUB_TOKEN']) ki tüm kütüphaneler tek kaynaktan görsün.
-    """
     tok = (os.getenv("GITHUB_TOKEN")
            or os.getenv("GH_TOKEN")
            or os.getenv("github_token"))
@@ -74,53 +75,81 @@ def resolve_github_token() -> Optional[str]:
     if tok:
         tok = str(tok).strip()
         if tok:
-            os.environ["GITHUB_TOKEN"] = tok
+            os.environ["GITHUB_TOKEN"] = tok  # tek kaynak
             return tok
     return None
 
 def gh_headers() -> dict:
-    """GitHub API header’ları (token varsa Authorization ekler)."""
     hdrs = {"Accept": "application/vnd.github+json"}
     tok = os.getenv("GITHUB_TOKEN") or resolve_github_token()
     if tok:
         hdrs["Authorization"] = f"Bearer {tok}"
     return hdrs
 
+def _mask(tok: Optional[str]) -> str:
+    if not tok: return "—"
+    t = str(tok)
+    if len(t) <= 12: return t[:3] + "…" + t[-2:]
+    return t[:6] + "…" + t[-4:]
+
+# ── Artifact / Release indirme
 @st.cache_data(show_spinner=True, ttl=15*60)
 def fetch_latest_artifact_zip(owner: str, repo: str, artifact_name: str) -> bytes:
-    # token'ı ENV'e enjekte et (idempotent)
-    resolve_github_token()
+    """
+    1) Token varsa: Actions Artifacts (en güncel).
+    2) Yoksa veya başarısızsa: Releases/latest/download/{ASSET_ZIP_1} (public).
+    """
+    tok = resolve_github_token()
+    if tok:
+        try:
+            base = f"https://api.github.com/repos/{owner}/{repo}/actions/artifacts"
+            r = requests.get(base, headers=gh_headers(), timeout=30)
+            r.raise_for_status()
+            items = r.json().get("artifacts", [])
+            cand = [a for a in items if a.get("name") == artifact_name and not a.get("expired", False)]
+            if cand:
+                cand.sort(key=lambda x: x.get("updated_at", "") or "", reverse=True)
+                url = cand[0].get("archive_download_url")
+                if url:
+                    r2 = requests.get(url, headers=gh_headers(), timeout=60)
+                    r2.raise_for_status()
+                    return r2.content
+        except Exception as e:
+            st.warning(f"Artifact API erişimi başarısız; Release fallback deneniyor… ({e})")
 
-    base = f"https://api.github.com/repos/{owner}/{repo}/actions/artifacts"
-    r = requests.get(base, headers=gh_headers(), timeout=30)
-    r.raise_for_status()
-    items = r.json().get("artifacts", [])
-    cand = [a for a in items if a.get("name") == artifact_name and not a.get("expired", False)]
-    if not cand:
-        raise FileNotFoundError(f"Artifact bulunamadı: {artifact_name}")
-    cand.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
-    url = cand[0].get("archive_download_url")
-    if not url:
-        raise RuntimeError("archive_download_url bulunamadı")
-    r2 = requests.get(url, headers=gh_headers(), timeout=60)
-    r2.raise_for_status()
-    return r2.content
+    # Release fallback (public)
+    rel_url = f"https://github.com/{owner}/{repo}/releases/latest/download/{ASSET_ZIP_1}"
+    r3 = requests.get(rel_url, timeout=60)
+    if r3.status_code == 200 and r3.content:
+        return r3.content
+    raise FileNotFoundError(
+        f"İndirilemedi: Artifact API ya da Release asset (denenen: {rel_url})."
+    )
 
 @st.cache_data(show_spinner=True, ttl=15*60)
 def read_risk_from_artifact(owner: str, repo: str, artifact_name: str) -> pd.DataFrame:
     zip_bytes = fetch_latest_artifact_zip(owner, repo, artifact_name)
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         memlist = zf.namelist()
+
+        # Önce doğrudan EXPECTED_PARQUET (risk_hourly.parquet)
         matches = [n for n in memlist if n.endswith("/" + EXPECTED_PARQUET) or n.endswith(EXPECTED_PARQUET)]
+
+        # Bulunamazsa ASSET_DIR_1 altında ara (ör. sf-crime-parquet/risk_hourly.parquet)
+        if not matches and ASSET_DIR_1:
+            matches = [n for n in memlist if n.endswith(f"{ASSET_DIR_1}/{EXPECTED_PARQUET}")]
+
         if not matches:
-            raise FileNotFoundError(f"Zip içinde {EXPECTED_PARQUET} yok. Örnek içerik: {memlist[:15]}")
+            sample = ", ".join(memlist[:10])
+            raise FileNotFoundError(f"Zip içinde {EXPECTED_PARQUET} bulunamadı. Örnek içerik: [{sample}]")
+
         with zf.open(matches[0]) as f:
             df = pd.read_parquet(f)
 
-    # kolonları normalize et
+    # kolon normalizasyonu
     df.columns = [c.strip().lower() for c in df.columns]
 
-    # risk_score kolonunu esnek eşle
+    # risk_score esnek eşle
     if "risk_score" not in df.columns:
         for alt in ("risk", "score", "prob", "probability"):
             if alt in df.columns:
@@ -129,7 +158,7 @@ def read_risk_from_artifact(owner: str, repo: str, artifact_name: str) -> pd.Dat
     if "risk_score" not in df.columns:
         raise ValueError("Beklenen kolon yok: risk_score")
 
-    # GEOID üret
+    # geoid türetme
     if "geoid" not in df.columns:
         for alt in ("cell_id", "geoid10", "geoid11", "geoid_10", "geoid_11", "id"):
             if alt in df.columns:
@@ -151,6 +180,7 @@ def read_risk_from_artifact(owner: str, repo: str, artifact_name: str) -> pd.Dat
 
     return df
 
+# ── Dönüşümler ve harita
 def daily_average(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
@@ -192,7 +222,6 @@ def fetch_geojson_smart(path_local: str, path_in_zip: str, raw_owner: str, raw_r
                 return json.load(f)
     except Exception:
         pass
-
     # 2) Artifact (varsa)
     try:
         zip_bytes = fetch_latest_artifact_zip(OWNER, REPO, ARTIFACT_NAME)
@@ -204,7 +233,6 @@ def fetch_geojson_smart(path_local: str, path_in_zip: str, raw_owner: str, raw_r
                     return json.load(io.TextIOWrapper(f, encoding="utf-8"))
     except Exception:
         pass
-
     # 3) Raw GitHub (public)
     try:
         raw = f"https://raw.githubusercontent.com/{raw_owner}/{raw_repo}/main/{path_local}"
@@ -213,13 +241,11 @@ def fetch_geojson_smart(path_local: str, path_in_zip: str, raw_owner: str, raw_r
             return r.json()
     except Exception:
         pass
-
     return {}
 
 def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
     if not geojson_dict or day_df.empty:
         return geojson_dict
-
     df = day_df.copy()
     df["geoid_digits"] = df["geoid"].astype(str).str.replace(r"\D", "", regex=True).str.zfill(11)
     dmap = (
@@ -228,15 +254,11 @@ def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
         .to_frame()
         .rename_axis("match_key")
     )
-
     feats = geojson_dict.get("features", [])
-    enriched = 0
-
     q25 = float(df["risk_score_daily"].quantile(0.25))
     q50 = float(df["risk_score_daily"].quantile(0.50))
     q75 = float(df["risk_score_daily"].quantile(0.75))
     EPS = 1e-12
-
     COLOR_MAP = {
         "çok düşük riskli": [200, 200, 200],
         "düşük riskli":     [56, 168, 0],
@@ -253,9 +275,7 @@ def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
                 if "geoid" in str(k).lower():
                     raw = v
                     break
-
         props.setdefault("display_id", str(raw or ""))
-
         key = only_digits(raw)[:11] if raw is not None else ""
         lvl = None
         if key and key in dmap.index:
@@ -268,13 +288,10 @@ def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
             elif val <= q50:   lvl = "orta riskli"
             elif val <= q75:   lvl = "riskli"
             else:              lvl = "yüksek riskli"
-            enriched += 1
-
         if lvl is None:
             lvl = props.get("risk_level", "çok düşük riskli")
         props["risk_level"] = lvl
         props["fill_color"] = COLOR_MAP.get(lvl, [220, 220, 220])
-
         out.append({**feat, "properties": props})
     return {**geojson_dict, "features": out}
 
@@ -305,41 +322,42 @@ def make_map(geojson_enriched: dict):
     )
     st.pydeck_chart(deck, use_container_width=True)
 
-# ── UI
+# ── UI / Diagnostik
 TOKEN = resolve_github_token()
 
-st.sidebar.header("GitHub Artifact")
+st.sidebar.header("GitHub Bağlantı")
 with st.sidebar.expander("🔐 Token Durumu", expanded=TOKEN is None):
-    st.write("ENV GITHUB_TOKEN:", "✅" if os.getenv("GITHUB_TOKEN") else "❌")
+    env_tok = os.getenv("GITHUB_TOKEN")
+    st.write("ENV GITHUB_TOKEN:", "✅" if env_tok else "❌")
     try:
         sec = getattr(st, "secrets", None)
-        has_secret_flat = bool(sec and any(k in sec and sec[k] for k in ("GITHUB_TOKEN","GH_TOKEN","github_token")))
-        has_secret_nested = bool(
-            sec and any(
-                isinstance(sec.get(b), dict) and any(x in sec[b] for x in ("GITHUB_TOKEN","GH_TOKEN","github_token","githubtoken","token"))
-                for b in ("github","tokens","secrets")
-            )
+        s_flat = bool(sec and any(k in sec and sec[k] for k in ("GITHUB_TOKEN","GH_TOKEN","github_token")))
+        s_nested = bool(
+            sec and any(isinstance(sec.get(b), dict) and any(x in sec[b] for x in ("GITHUB_TOKEN","GH_TOKEN","github_token"))
+                        for b in ("github","tokens","secrets","config"))
         )
-        st.write("secrets (düz):", "✅" if has_secret_flat else "❌")
-        st.write("secrets (iç içe):", "✅" if has_secret_nested else "❌")
+        st.write("secrets (düz):", "✅" if s_flat else "❌")
+        st.write("secrets (iç içe):", "✅" if s_nested else "❌")
+        st.write("Token (maskeli):", _mask(env_tok))
     except Exception:
-        st.write("secrets erişimi: ❌ (lokalde olabilir)")
+        st.write("secrets erişimi: ❌ (lokal olabilir)")
 
-refresh = st.sidebar.button("Veriyi Yenile (artifact'i tazele)")
+refresh = st.sidebar.button("Veriyi Yenile (artefact/asset)")
 if refresh:
     fetch_latest_artifact_zip.clear()
     read_risk_from_artifact.clear()
     fetch_geojson_smart.clear()
 
+# ── Veri yükleme
 try:
     if not TOKEN:
-        st.error("GitHub token yok. `st.secrets['GITHUB_TOKEN'/'GH_TOKEN'/'github_token']` ya da `GITHUB_TOKEN` ENV ayarlayın.")
-        st.stop()
+        st.warning("GitHub token bulunamadı — Actions artifact yerine Release yedeği deneniyor…")
     risk_df = read_risk_from_artifact(OWNER, REPO, ARTIFACT_NAME)
 except Exception as e:
-    st.error(f"Artifact indirilemedi/okunamadı: {e}")
+    st.error(f"Veri indirilemedi: {e}")
     st.stop()
 
+# ── Günlük ortalama ve harita
 risk_daily = daily_average(risk_df)
 dates = sorted(risk_daily["date"].unique())
 sel_date = st.sidebar.selectbox("Gün seçin", dates, index=len(dates) - 1, format_func=str) if dates else None
@@ -349,7 +367,6 @@ if not one_day.empty:
     q25 = one_day['q25'].iloc[0] * 100
     q50 = one_day['q50'].iloc[0] * 100
     q75 = one_day['q75'].iloc[0] * 100
-
     st.markdown(
         f"""
         <div style="font-size:17px; margin-top:10px; line-height:1.6;">
@@ -358,14 +375,12 @@ if not one_day.empty:
             🟠 <b>Riskli:</b> &gt; %{q50:.2f}<br>
             🔴 <b>Yüksek Riskli:</b> &gt; %{q75:.2f}
         </div>
-
         <div style="font-size:13px; font-style:italic; color:#666; margin-top:8px;">
             Bu sınıflandırma, GEOID alanlarını dört risk seviyesine ayırmak için belirlenen günlük risk skorlarından elde edilen değişken eşiklere dayanmaktadır.
         </div>
         """,
         unsafe_allow_html=True
     )
-
     gj = fetch_geojson_smart(
         GEOJSON_PATH_LOCAL_DEFAULT,
         GEOJSON_PATH_LOCAL_DEFAULT,
