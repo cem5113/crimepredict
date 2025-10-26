@@ -27,6 +27,18 @@ RAW_GEOJSON_OWNER = cfg.get("geojson_owner", "cem5113")
 RAW_GEOJSON_REPO = cfg.get("geojson_repo", "crimepredict")
 
 # ── Token çözümleme (env > secrets)
+def _get_secret_from_streamlit(keys=("GITHUB_TOKEN","GH_TOKEN","github_token")) -> Optional[str]:
+    try:
+        import streamlit as st  # sadece streamlit içinde çalışırken var
+        for k in keys:
+            if k in st.secrets and st.secrets[k]:
+                val = str(st.secrets[k]).strip()
+                if val:
+                    return val
+    except Exception:
+        pass
+    return None
+
 def resolve_github_token() -> str | None:
     tok = os.getenv("GITHUB_TOKEN")
     if tok:
