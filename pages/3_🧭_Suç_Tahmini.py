@@ -18,7 +18,7 @@ from streamlit_folium import st_folium
 import folium
 
 # ── constants & local path
-from utils.constants import SF_TZ_OFFSET, KEY_COL, MODEL_VERSION, MODEL_LAST_TRAIN, CATEGORIES
+from utils.meta import SF_TZ_OFFSET, KEY_COL, MODEL_VERSION, MODEL_LAST_TRAIN, CATEGORIES
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(PROJECT_ROOT)
 if ROOT not in sys.path:
