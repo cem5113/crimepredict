@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 import pydeck as pdk
 import requests
+
 from components.last_update import show_last_update_badge
 from components.meta import MODEL_VERSION, MODEL_LAST_TRAIN
 
@@ -17,7 +18,7 @@ st.markdown(
 )
 
 # ── Ayarlar
-cfg = st.secrets if hasattr(st, "secrets") else {}
+cfg = getattr(st, "secrets", {}) if hasattr(st, "secrets") else {}
 OWNER = cfg.get("artifact_owner", "cem5113")
 REPO = cfg.get("artifact_repo", "crime_prediction_data")
 ARTIFACT_NAME = cfg.get("artifact_name", "sf-crime-parquet")
@@ -27,41 +28,69 @@ GEOJSON_PATH_LOCAL_DEFAULT = cfg.get("geojson_path", "data/sf_cells.geojson")
 RAW_GEOJSON_OWNER = cfg.get("geojson_owner", "cem5113")
 RAW_GEOJSON_REPO = cfg.get("geojson_repo", "crimepredict")
 
-# ── Token çözümleme (env > secrets)
-def _get_secret_from_streamlit(keys=("GITHUB_TOKEN","GH_TOKEN","github_token")) -> Optional[str]:
+# ── Token çözümleme (ENV > st.secrets [düz + iç içe])
+def _secret_lookup_in_secrets(keys=("GITHUB_TOKEN", "GH_TOKEN", "github_token")) -> Optional[str]:
+    """
+    st.secrets içinde önce düz anahtarları, ardından muhtemel alt sözlükleri ('github', 'tokens', 'secrets')
+    tarar ve ilk bulunan non-empty değeri döndürür.
+    """
     try:
-        import streamlit as st  # sadece streamlit içinde çalışırken var
+        sec = getattr(st, "secrets", None)
+        if not sec:
+            return None
+
+        # 1) Düz anahtarlar
         for k in keys:
-            if k in st.secrets and st.secrets[k]:
-                val = str(st.secrets[k]).strip()
-                if val:
-                    return val
+            v = sec.get(k)
+            if v:
+                v = str(v).strip()
+                if v:
+                    return v
+
+        # 2) İç içe olası bölümler
+        for bucket in ("github", "tokens", "secrets"):
+            sub = sec.get(bucket)
+            if isinstance(sub, dict):
+                for k in list(keys) + [k.lower() for k in keys]:
+                    v = sub.get(k)
+                    if v:
+                        v = str(v).strip()
+                        if v:
+                            return v
     except Exception:
         pass
     return None
 
-def resolve_github_token() -> str | None:
-    tok = os.getenv("GITHUB_TOKEN")
+def resolve_github_token() -> Optional[str]:
+    """
+    Öncelik: ENV (GITHUB_TOKEN / GH_TOKEN / github_token) → st.secrets (düz/iç içe) → None.
+    Bulunca ENV'e yazar (os.environ['GITHUB_TOKEN']) ki tüm kütüphaneler tek kaynaktan görsün.
+    """
+    tok = (os.getenv("GITHUB_TOKEN")
+           or os.getenv("GH_TOKEN")
+           or os.getenv("github_token"))
+    if not tok:
+        tok = _secret_lookup_in_secrets()
     if tok:
-        return tok
-    for k in ("github_token", "GH_TOKEN", "GITHUB_TOKEN"):
-        try:
-            if k in st.secrets and st.secrets[k]:
-                os.environ["GITHUB_TOKEN"] = str(st.secrets[k])  # env'e yazarak tek kaynak
-                return os.environ["GITHUB_TOKEN"]
-        except Exception:
-            pass
+        tok = str(tok).strip()
+        if tok:
+            os.environ["GITHUB_TOKEN"] = tok
+            return tok
     return None
 
 def gh_headers() -> dict:
+    """GitHub API header’ları (token varsa Authorization ekler)."""
     hdrs = {"Accept": "application/vnd.github+json"}
-    tok = os.getenv("GITHUB_TOKEN")
+    tok = os.getenv("GITHUB_TOKEN") or resolve_github_token()
     if tok:
         hdrs["Authorization"] = f"Bearer {tok}"
     return hdrs
 
 @st.cache_data(show_spinner=True, ttl=15*60)
 def fetch_latest_artifact_zip(owner: str, repo: str, artifact_name: str) -> bytes:
+    # token'ı ENV'e enjekte et (idempotent)
+    resolve_github_token()
+
     base = f"https://api.github.com/repos/{owner}/{repo}/actions/artifacts"
     r = requests.get(base, headers=gh_headers(), timeout=30)
     r.raise_for_status()
@@ -88,6 +117,7 @@ def read_risk_from_artifact(owner: str, repo: str, artifact_name: str) -> pd.Dat
         with zf.open(matches[0]) as f:
             df = pd.read_parquet(f)
 
+    # kolonları normalize et
     df.columns = [c.strip().lower() for c in df.columns]
 
     # risk_score kolonunu esnek eşle
@@ -208,11 +238,11 @@ def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
     EPS = 1e-12
 
     COLOR_MAP = {
-        "çok düşük riskli": [200, 200, 200], 
-        "düşük riskli":     [56, 168, 0],     
-        "orta riskli":      [255, 221, 0],    
-        "riskli":           [255, 140, 0],    
-        "yüksek riskli":    [204, 0, 0],     
+        "çok düşük riskli": [200, 200, 200],
+        "düşük riskli":     [56, 168, 0],
+        "orta riskli":      [255, 221, 0],
+        "riskli":           [255, 140, 0],
+        "yüksek riskli":    [204, 0, 0],
     }
     out = []
     for feat in feats:
@@ -231,7 +261,7 @@ def inject_properties(geojson_dict: dict, day_df: pd.DataFrame) -> dict:
         if key and key in dmap.index:
             val = float(dmap.loc[key, "risk_score_daily"])
             props["risk_score_daily"] = val
-            disp = min(val, 0.999) 
+            disp = min(val, 0.999)
             props["risk_score_txt"] = f"{disp:.3f}"
             if abs(val) <= EPS: lvl = "çok düşük riskli"
             elif val <= q25:   lvl = "düşük riskli"
@@ -280,13 +310,20 @@ TOKEN = resolve_github_token()
 
 st.sidebar.header("GitHub Artifact")
 with st.sidebar.expander("🔐 Token Durumu", expanded=TOKEN is None):
-    st.write("Env GITHUB_TOKEN:", "✅" if os.getenv("GITHUB_TOKEN") else "❌")
-    has_secret = False
+    st.write("ENV GITHUB_TOKEN:", "✅" if os.getenv("GITHUB_TOKEN") else "❌")
     try:
-        has_secret = any(k in st.secrets for k in ("github_token", "GH_TOKEN", "GITHUB_TOKEN"))
+        sec = getattr(st, "secrets", None)
+        has_secret_flat = bool(sec and any(k in sec and sec[k] for k in ("GITHUB_TOKEN","GH_TOKEN","github_token")))
+        has_secret_nested = bool(
+            sec and any(
+                isinstance(sec.get(b), dict) and any(x in sec[b] for x in ("GITHUB_TOKEN","GH_TOKEN","github_token","githubtoken","token"))
+                for b in ("github","tokens","secrets")
+            )
+        )
+        st.write("secrets (düz):", "✅" if has_secret_flat else "❌")
+        st.write("secrets (iç içe):", "✅" if has_secret_nested else "❌")
     except Exception:
-        pass
-    st.write("Secrets'ta Token:", "✅" if has_secret else "❌")
+        st.write("secrets erişimi: ❌ (lokalde olabilir)")
 
 refresh = st.sidebar.button("Veriyi Yenile (artifact'i tazele)")
 if refresh:
@@ -296,7 +333,7 @@ if refresh:
 
 try:
     if not TOKEN:
-        st.error("GitHub token yok. `st.secrets['github_token']` veya GITHUB_TOKEN env ayarlayın.")
+        st.error("GitHub token yok. `st.secrets['GITHUB_TOKEN'/'GH_TOKEN'/'github_token']` ya da `GITHUB_TOKEN` ENV ayarlayın.")
         st.stop()
     risk_df = read_risk_from_artifact(OWNER, REPO, ARTIFACT_NAME)
 except Exception as e:
@@ -321,7 +358,7 @@ if not one_day.empty:
             🟠 <b>Riskli:</b> &gt; %{q50:.2f}<br>
             🔴 <b>Yüksek Riskli:</b> &gt; %{q75:.2f}
         </div>
-    
+
         <div style="font-size:13px; font-style:italic; color:#666; margin-top:8px;">
             Bu sınıflandırma, GEOID alanlarını dört risk seviyesine ayırmak için belirlenen günlük risk skorlarından elde edilen değişken eşiklere dayanmaktadır.
         </div>
