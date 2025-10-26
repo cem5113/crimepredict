@@ -1,10 +1,17 @@
-streamlit==1.38.0
+# --- Core packages ---
 pandas==2.2.3
-numpy==1.26.4          # xgboost/scikit-learn ile stabil
-xgboost==2.1.1         # tahmin modeli
-scikit-learn==1.5.2    # train/test split, ROC-AUC
-pyarrow==17.0.0        # parquet okuma
-requests==2.32.3       # artifact ZIP indirme
-pydeck==0.9.1          # harita (alternatif olarak folium da var)
+numpy==1.26.4
+scikit-learn==1.5.2
+xgboost==2.1.1
+lightgbm==4.5.0
+joblib==1.4.2
+
+# --- Visualization & UI ---
+streamlit==1.38.0
+pydeck==0.9.1
 folium==0.17.0
 streamlit-folium==0.20.0
+
+# --- I/O & utilities ---
+pyarrow==17.0.0
+requests==2.32.3
