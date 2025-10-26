@@ -7,7 +7,7 @@ from typing import Optional, Dict, Any, Iterable
 import numpy as np
 import pandas as pd
 
-from utils.constants import CRIME_TYPES, KEY_COL, CATEGORY_TO_KEYS, SF_TZ_OFFSET
+from components.utils.constants import CRIME_TYPES, KEY_COL, CATEGORY_TO_KEYS, SF_TZ_OFFSET
 
 # ---- küçük yardımcılar ----
 def _haversine_m(lat1, lon1, lat2, lon2) -> float:
