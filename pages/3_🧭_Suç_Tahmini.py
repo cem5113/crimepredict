@@ -125,14 +125,10 @@ df, metrics = load_artifact_data()
 # 🕒 Güncel durum ve başlık
 # ───────────────────────────────
 show_last_update_badge(
-    app_name="SUTAM – Suç Tahmin Modeli",
-    data_upto=datetime.now(),
+    data_upto=datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
     model_version=MODEL_VERSION,
     last_train=MODEL_LAST_TRAIN,
-    daily_update_hour_sf=19,
-    show_times=True,
 )
-
 # ───────────────────────────────
 # 📊 Model Metrikleri
 # ───────────────────────────────
