@@ -1,4 +1,4 @@
-3_🧭_Suç_Tahmini.py
+# 3_🧭_Suç_Tahmini.py
 # app.py  —  Suç Tahmini (Streamlit)
 # Tek sayfa: tarih/saat(veya gün/aralık) + kategori + GEOID filtreleriyle sonuçları listeler/grafikler.
 # Bu dosyayı köke (crime_forecast/app.py) koyabilir veya pages/3_🌀_Suç_Tahmini.py olarak kaydedebilirsiniz.
