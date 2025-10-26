@@ -75,7 +75,23 @@ except Exception:
         return df
 
 # ───────────────────────────────── helpers ─────────────────────────────────
-
+def _ensure_geoid(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    cols = {c.lower(): c for c in df.columns}
+    for cand in ("geoid", "geoid_x", "geoid_y", "id", "GEOID"):
+        if cand in df.columns:
+            df = df.rename(columns={cand: "geoid"})
+            break
+        if cand.lower() in cols:
+            df = df.rename(columns={cols[cand.lower()]: "geoid"})
+            break
+    if "geoid" not in df.columns:
+        st.error("Veride 'geoid' kolonunu bulamadım. Harita çizimi için gerekli.")
+        st.stop()
+    df["geoid"] = df["geoid"].astype(str)
+    return df
+    
 def ensure_keycol(df: pd.DataFrame, want: str = KEY_COL) -> pd.DataFrame:
     if df is None or df.empty:
         return df
