@@ -393,6 +393,14 @@ if sekme == "Operasyon":
         if agg is not None:
             if engine == "Folium":
                 try:
+                    # --- GEOID kolonunu garantiye al ---
+                    if "geoid" not in df.columns:
+                        possible_keys = [c for c in df.columns if c.lower() in ("geoid", "geoid_x", "geoid_y", "id", "GEOID")]
+                        if possible_keys:
+                            df = df.rename(columns={possible_keys[0]: "geoid"})
+                        else:
+                            st.error("Veride 'geoid' kolonu bulunamadı. Harita çizimi için gerekli.")
+                            st.stop()
                     m = build_map_fast(
                         df_agg=agg, geo_features=GEO_FEATURES, geo_df=GEO_DF,
                         show_popups=show_popups, patrol=st.session_state.get("patrol"),
