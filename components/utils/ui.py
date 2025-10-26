@@ -343,7 +343,7 @@ def build_map_fast(
     geo_features: list,
     geo_df: pd.DataFrame,
     show_popups: bool = False,
-    patrol: Dict | None = None,
+    patrol: dict | None = None,
     *,
     show_poi: bool = False,
     show_transit: bool = False,
@@ -364,15 +364,36 @@ def build_map_fast(
     perm_hotspot_layer_name: str = "Hotspot (kalıcı)",
     temp_hotspot_layer_name: str = "Hotspot (geçici)",
 ) -> "folium.Map":
-    # Base map
+
+    # ───────────────────────────────
+    # GEOID ve kolon düzenleme güvenliği
+    # ───────────────────────────────
+    if df_agg is None or df_agg.empty:
+        st.warning("Boş veri geldi, harita çizilemiyor.")
+        return folium.Map(location=[37.7749, -122.4194], zoom_start=12)
+
+    # Kolon adlarını temizle
+    df_agg.columns = [c.strip() for c in df_agg.columns]
+
+    # GEOID kolonunu garantiye al
+    if "geoid" not in df_agg.columns:
+        for alt in ("GEOID", "id", "geoid_x", "geoid_y"):
+            if alt in df_agg.columns:
+                df_agg = df_agg.rename(columns={alt: "geoid"})
+                break
+
+    # Harita tabanı
     m = folium.Map(location=[37.7749, -122.4194], zoom_start=12, tiles=None)
     folium.TileLayer(
         tiles="CartoDB positron",
         name="cartodbpositron",
         control=True,
         attr='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> '
-             'contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+             'contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
     ).add_to(m)
+
+    # Buradan sonra heatmap, poligon, marker gibi katmanlar eklenir...
+    return m
 
     if df_agg is None or df_agg.empty:
         return m
