@@ -40,6 +40,34 @@ except Exception:
 
 
 # ───────────────────────────────── helpers ─────────────────────────────────
+import streamlit as st, os
+
+def resolve_github_token() -> str | None:
+    # 1️⃣ Önce environment variable kontrol et
+    tok = os.getenv("GITHUB_TOKEN")
+    if tok:
+        return tok
+
+    # 2️⃣ Streamlit secrets varsa oku
+    try:
+        keys = list(st.secrets.keys())
+        if "github_token" in keys and st.secrets["github_token"]:
+            os.environ["GITHUB_TOKEN"] = str(st.secrets["github_token"])
+            return os.environ["GITHUB_TOKEN"]
+    except Exception as e:
+        print("st.secrets okunamadı:", e)
+
+    # 3️⃣ Fallback: local test için dış dosyadan yükle (örneğin secrets_local.toml)
+    if os.path.exists(".streamlit/secrets_local.toml"):
+        import tomllib
+        with open(".streamlit/secrets_local.toml", "rb") as f:
+            local = tomllib.load(f)
+        if "github_token" in local:
+            os.environ["GITHUB_TOKEN"] = local["github_token"]
+            return os.environ["GITHUB_TOKEN"]
+
+    return None
+
 def ensure_keycol(df: pd.DataFrame, want: str = KEY_COL) -> pd.DataFrame:
     if df is None or df.empty:
         return df
