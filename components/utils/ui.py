@@ -12,14 +12,14 @@ import streamlit as st
 
 # 🔒 constants (safe import; dairesel importu önler)
 try:
-    from utils.constants import KEY_COL, CRIME_TYPES, SF_TZ_OFFSET
+    from componentsçutils.constants import KEY_COL, CRIME_TYPES, SF_TZ_OFFSET
 except Exception:
     KEY_COL = "GEOID"
     CRIME_TYPES = []
     SF_TZ_OFFSET = -7  # SF ≈ UTC-7 (yaz), fallback
 
 try:
-    from utils.forecast import pois_pi90
+    from components.utils.forecast import pois_pi90
 except Exception:
     # Basit ~90% PI yaklaşımı (gaussian approx) – sadece fallback
     def pois_pi90(lam: float) -> tuple[int, int]:
