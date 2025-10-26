@@ -50,66 +50,74 @@ def resolve_github_token() -> str | None:
 
 @st.cache_data(show_spinner=True)
 def load_artifact_data() -> tuple[pd.DataFrame, pd.DataFrame]:
-    import requests, io, zipfile
+    """GitHub Actions artifact'tan fr_crime_09.parquet ve metrics_stacking_ohe.parquet indirir."""
     token = resolve_github_token()
     if not token:
-        st.error("GitHub token yok (GITHUB_TOKEN / GH_TOKEN).")
+        st.error("GitHub Token bulunamadı (GH_TOKEN veya GITHUB_TOKEN).")
         return pd.DataFrame(), pd.DataFrame()
 
-    H = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
-
-    # 1) Son başarılı run'ları getir
-    runs = requests.get(f"https://api.github.com/repos/{OWNER}/{REPO}/actions/runs?per_page=15", headers=H, timeout=30).json()
-    run_ids = [r["id"] for r in runs.get("workflow_runs", []) if r.get("conclusion")=="success"]
-
-    for rid in run_ids:
-        # 2) Run içindeki artifact’ları tara
-        arts = requests.get(f"https://api.github.com/repos/{OWNER}/{REPO}/actions/runs/{rid}/artifacts",
-                            headers=H, timeout=30).json().get("artifacts", [])
-        art = next((a for a in arts if a["name"]==TARGET_ARTIFACT and not a.get("expired")), None)
-        if not art:
-            continue
-
-        # 3) Dış zip’i indir
-        outer_bytes = requests.get(art["archive_download_url"], headers=H, timeout=60).content
-        outer = zipfile.ZipFile(io.BytesIO(outer_bytes))
-        outer_names = outer.namelist()
-
-        # 4) İç zip’i bul (ör: fr_parquet_outputs.zip)
-        inner_name = next((n for n in outer_names if n.lower().endswith(".zip")), None)
-        if not inner_name:
-            st.error("İç zip bulunamadı (nested zip bekleniyordu).")
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+    try:
+        # 1️⃣ En son başarılı workflow run
+        runs = requests.get(
+            f"https://api.github.com/repos/{OWNER}/{REPO}/actions/runs?per_page=10",
+            headers=headers, timeout=30
+        ).json()
+        run_ids = [r["id"] for r in runs.get("workflow_runs", []) if r.get("conclusion") == "success"]
+        if not run_ids:
+            st.warning("Başarılı workflow run bulunamadı.")
             return pd.DataFrame(), pd.DataFrame()
 
-        inner = zipfile.ZipFile(io.BytesIO(outer.read(inner_name)))
-        names = inner.namelist()
-        st.caption(f"Artifact içerik: {names}")
+        # 2️⃣ İlgili artifact'i bul
+        for rid in run_ids:
+            arts = requests.get(
+                f"https://api.github.com/repos/{OWNER}/{REPO}/actions/runs/{rid}/artifacts",
+                headers=headers, timeout=30
+            ).json().get("artifacts", [])
+            target = next((a for a in arts if a["name"] == "fr-crime-outputs-parquet" and not a.get("expired")), None)
+            if not target:
+                continue
 
-        # 5) Hedef dosyaları kesin uzantı filtresiyle seç
-        csv_name     = next((n for n in names if n.lower().endswith("fr_crime_09.csv")), None)
-        metrics_name = next((n for n in names if n.lower().endswith("metrics_stacking_ohe.parquet")), None)
+            # 3️⃣ Artifact indir
+            zdata = requests.get(target["archive_download_url"], headers=headers, timeout=60).content
+            outer = zipfile.ZipFile(io.BytesIO(zdata))
 
-        if not csv_name:
-            st.error("fr_crime_09.csv bulunamadı.")
-            return pd.DataFrame(), pd.DataFrame()
+            # 4️⃣ İçteki zip'i aç (ör: fr_parquet_outputs.zip)
+            inner_zip_name = next((n for n in outer.namelist() if n.lower().endswith(".zip")), None)
+            if not inner_zip_name:
+                st.error("İç zip (ör: fr_parquet_outputs.zip) bulunamadı.")
+                return pd.DataFrame(), pd.DataFrame()
 
-        # 6) CSV’yi oku (binary -> BytesIO -> read_csv)
-        df = pd.read_csv(io.BytesIO(inner.read(csv_name)))
+            nested = zipfile.ZipFile(io.BytesIO(outer.read(inner_zip_name)))
+            names = nested.namelist()
+            st.caption(f"Artifact içerik: {names}")
 
-        # 7) Metrikleri oku (varsa ve engine mevcutsa)
-        metrics = pd.DataFrame()
-        if metrics_name:
-            try:
-                metrics = pd.read_parquet(io.BytesIO(inner.read(metrics_name)))  # pyarrow/fastparquet gerektirir
-            except Exception as e:
-                st.warning(f"metrics_stacking_ohe.parquet okunamadı (pyarrow/fastparquet yok olabilir): {e}")
-                metrics = pd.DataFrame()
+            # 5️⃣ Parquet dosyalarını bul
+            crime_name = next((n for n in names if n.lower().endswith("fr_crime_09.parquet")), None)
+            metrics_name = next((n for n in names if n.lower().endswith("metrics_stacking_ohe.parquet")), None)
 
-        st.success("✅ Artifact başarıyla yüklendi.")
-        return df, metrics
+            if not crime_name:
+                st.error("fr_crime_09.parquet bulunamadı.")
+                return pd.DataFrame(), pd.DataFrame()
 
-    st.error("Uygun artifact bulunamadı (ad: fr-crime-outputs-parquet).")
-    return pd.DataFrame(), pd.DataFrame()
+            # 6️⃣ Parquet dosyalarını oku
+            df = pd.read_parquet(io.BytesIO(nested.read(crime_name)))
+            metrics = pd.DataFrame()
+            if metrics_name:
+                try:
+                    metrics = pd.read_parquet(io.BytesIO(nested.read(metrics_name)))
+                except Exception as e:
+                    st.warning(f"metrics_stacking_ohe.parquet okunamadı: {e}")
+
+            st.success(f"✅ Artifact yüklendi: {crime_name}")
+            return df, metrics
+
+        st.error("Artifact bulunamadı (adı: fr-crime-outputs-parquet).")
+        return pd.DataFrame(), pd.DataFrame()
+
+    except Exception as e:
+        st.error(f"Artifact indirilemedi veya açılırken hata: {e}")
+        return pd.DataFrame(), pd.DataFrame()
         
 df, metrics = load_artifact_data()
 
