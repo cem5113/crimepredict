@@ -1,461 +1,278 @@
-# pages/3_🔮_Suç_Tahmini_ve_Forecast.py
-from __future__ import annotations
-import os, sys
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
+# pages/3_🧭_Suç_Tahmini.py
+# -----------------------------------------------------------
+# Basit: Artifact ZIP -> Parquet oku -> Seçime göre anlık tahmin
+# -----------------------------------------------------------
 
-from components.meta import SF_TZ_OFFSET, KEY_COL, MODEL_VERSION, MODEL_LAST_TRAIN, CATEGORIES
-
-import io, zipfile
+import io, zipfile, requests, math
 from datetime import datetime, timedelta
-from typing import Optional, Tuple
-
-import numpy as np
 import pandas as pd
+import numpy as np
 import streamlit as st
-from streamlit_folium import st_folium
-import folium
 
-# ── constants & local path
-from components.meta import SF_TZ_OFFSET, KEY_COL, MODEL_VERSION, MODEL_LAST_TRAIN, CATEGORIES
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(PROJECT_ROOT)
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
+# ML
+from xgboost import XGBClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
 
-# ── local modules
-from utils.geo import load_geoid_layer, resolve_clicked_gid
-from utils.forecast import precompute_base_intensity, aggregate_fast, prob_ge_k
-from ui import (
-    SMALL_UI_CSS, render_result_card, build_map_fast,
-    render_kpi_row, render_day_hour_heatmap as _fallback_heatmap
-)
+st.set_page_config(page_title="🧭 Suç Tahmini (Demo)", layout="wide")
+st.title("🧭 Suç Tahmini (Demo)")
+st.caption("GitHub artifact'tan veri okunur, kullanıcı seçimine göre anlık tahmin yapılır.")
 
-# utils/heatmap varsa onu kullan, yoksa ui.py'deki fallback'i kullan
-try:
-    from utils.heatmap import render_day_hour_heatmap  # type: ignore
-except Exception:
-    render_day_hour_heatmap = _fallback_heatmap  # type: ignore
+# --- Kullanıcı ayarları / sabitler ---
+ZIP_URL_DEFAULT = "https://github.com/cem5113/crime_prediction_data/releases/latest/download/fr-crime-outputs-parquet.zip"
+MAX_ROWS_PREVIEW = 1000
 
+# -----------------------------------------------------------
+# Yardımcılar
+# -----------------------------------------------------------
+def _find_col(df, candidates, default=None):
+    """Aday isimler içinden ilk mevcut olan sütunu döndür."""
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return default
 
-# ───────────────────────────────── helpers ─────────────────────────────────
-import streamlit as st, os
-
-def resolve_github_token() -> str | None:
-    # 1️⃣ Önce environment variable kontrol et
-    tok = os.getenv("GITHUB_TOKEN")
-    if tok:
-        return tok
-
-    # 2️⃣ Streamlit secrets varsa oku
+def _to_datetime_safe(s, fallback_format=None):
     try:
-        keys = list(st.secrets.keys())
-        if "github_token" in keys and st.secrets["github_token"]:
-            os.environ["GITHUB_TOKEN"] = str(st.secrets["github_token"])
-            return os.environ["GITHUB_TOKEN"]
-    except Exception as e:
-        print("st.secrets okunamadı:", e)
-
-    # 3️⃣ Fallback: local test için dış dosyadan yükle (örneğin secrets_local.toml)
-    if os.path.exists(".streamlit/secrets_local.toml"):
-        import tomllib
-        with open(".streamlit/secrets_local.toml", "rb") as f:
-            local = tomllib.load(f)
-        if "github_token" in local:
-            os.environ["GITHUB_TOKEN"] = local["github_token"]
-            return os.environ["GITHUB_TOKEN"]
-
-    return None
-
-def ensure_keycol(df: pd.DataFrame, want: str = KEY_COL) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df
-    out = df.copy()
-    alts = {want.upper(), want.lower(), "GEOID", "geoid", "GeoID"}
-    hit = next((c for c in out.columns if c in alts), None)
-    if hit:
-        out = out.rename(columns={hit: want})
-    if want in out.columns:
-        out[want] = out[want].astype(str)
-    return out
-
-def normalize_schema(df: pd.DataFrame) -> pd.DataFrame:
-    """GEOID, datetime, category, crime_count ve popup için gerekli ana kolonları düzenler."""
-    df = df.copy()
-
-    # GEOID -> geoid (string)
-    for cand in ["geoid", "GEOID", "GeoID"]:
-        if cand in df.columns:
-            df = df.rename(columns={cand: "geoid"})
-            break
-    if "geoid" in df.columns:
-        df["geoid"] = df["geoid"].astype(str)
-
-    # datetime üret
-    if "datetime" not in df.columns:
-        if {"date", "time"}.issubset(df.columns):
-            df["datetime"] = pd.to_datetime(df["date"] + " " + df["time"], errors="coerce", utc=True)
-        else:
-            for c in ["ts", "timestamp", "occurred_at", "reported_at", "received_time"]:
-                if c in df.columns:
-                    df["datetime"] = pd.to_datetime(df[c], errors="coerce", utc=True)
-                    break
-    if "datetime" in df.columns:
-        df = df.dropna(subset=["datetime"])
-
-    # kategori kolon adı
-    if "category" not in df.columns:
-        for c in ["type", "crime_type", "Category"]:
-            if c in df.columns:
-                df = df.rename(columns={c: "category"})
-                break
-
-    # hedef
-    if "crime_count" not in df.columns:
-        for c in ["911_request_count_hour_range", "911_request_count_daily(before_24_hours)"]:
-            if c in df.columns:
-                df["crime_count"] = pd.to_numeric(df[c], errors="coerce")
-                break
-        else:
-            # en azından var/yok
-            df["crime_count"] = 1.0
-
-    keep = [c for c in [
-        "geoid", "datetime", "category", "subcategory", "crime_count",
-        "latitude", "longitude",
-        # popup/özet için faydalı:
-        "neighbor_crime_24h", "neighbor_crime_72h", "neighbor_crime_7d",
-        "population", "bus_stop_count", "train_stop_count",
-        "poi_total_count", "poi_risk_score", "poi_dominant_type",
-        "Y_label"
-    ] if c in df.columns]
-    return df[keep].copy()
-
-def load_artifacts() -> tuple[pd.DataFrame, Optional[pd.DataFrame]]:
-    """
-    fr_crime_10.parquet + artifacts/fr-crime-outputs-parquet.zip içindeki fr_crime_09.csv (opsiyonel)
-    Dönüş: (df10_norm, df9_norm_or_None)
-    """
-    # 1) ana parquet
-    p10 = os.path.join(ROOT, "fr_crime_10.parquet")
-    if not os.path.exists(p10):
-        st.warning("fr_crime_10.parquet bulunamadı. Sadece artifacts içeriğiyle devam edeceğim.")
-        df10 = pd.DataFrame()
-    else:
-        df10 = pd.read_parquet(p10, engine="pyarrow")
-        df10 = normalize_schema(df10)
-
-    # 2) artifacts → iç zip
-    df9 = None
-    zpath = os.path.join(ROOT, "artifacts", "fr-crime-outputs-parquet.zip")
-    if os.path.exists(zpath):
-        try:
-            z1 = zipfile.ZipFile(zpath, "r")
-            inner = [n for n in z1.namelist() if n.endswith(".zip")]
-            if inner:
-                with z1.open(inner[0]) as inner_bytes:
-                    z2 = zipfile.ZipFile(io.BytesIO(inner_bytes.read()), "r")
-                    csv_name = [n for n in z2.namelist() if n.endswith("fr_crime_09.csv")]
-                    if csv_name:
-                        with z2.open(csv_name[0]) as f:
-                            df9 = pd.read_csv(f)
-                            df9 = normalize_schema(df9)
-        except Exception as e:
-            st.info(f"Artifacts içeriği okunurken bir uyarı oluştu: {e}")
-
-    return df10, df9
-
-def top3_by_geoid(df: pd.DataFrame) -> dict[str, list[tuple[str, int]]]:
-    """Her geoid için toplam crime_count'a göre en sık görülen ilk 3 kategoriyi döndürür."""
-    if df is None or df.empty or not {"geoid","category","crime_count"}.issubset(df.columns):
-        return {}
-    tmp = (df.groupby(["geoid", "category"])["crime_count"]
-           .sum()
-           .reset_index()
-           .sort_values(["geoid", "crime_count"], ascending=[True, False]))
-    out: dict[str, list[tuple[str, int]]] = {}
-    for gid, part in tmp.groupby("geoid"):
-        out[str(gid)] = list(part.head(3)[["category", "crime_count"]].itertuples(index=False, name=None))
-    return out
-
-def now_sf_iso() -> str:
-    return (datetime.utcnow() + timedelta(hours=SF_TZ_OFFSET)).isoformat(timespec="seconds")
-
-def run_prediction(
-    start_h: int,
-    end_h: int,
-    filters: dict,
-    geo_df: pd.DataFrame,
-    base_int: pd.DataFrame,
-) -> Tuple[pd.DataFrame, Optional[pd.DataFrame], str, int]:
-    """Varolan aggregate_fast altyapınıza göre tahmin üretir; tier ataması utils tarafında yapılmış kabul edilir."""
-    start_dt = (datetime.utcnow() + timedelta(hours=SF_TZ_OFFSET + start_h)).replace(minute=0, second=0, microsecond=0)
-    horizon_h = max(1, end_h - start_h)
-    start_iso = start_dt.isoformat()
-
-    # events (opsiyonel) – yoksa boş geç
-    try:
-        from utils.reports import load_events  # type: ignore
-        events_df = load_events(os.path.join(ROOT, "data", "events.csv"))
+        return pd.to_datetime(s, errors="coerce")
     except Exception:
-        events_df = pd.DataFrame()
+        if fallback_format:
+            return pd.to_datetime(s, format=fallback_format, errors="coerce")
+        return pd.to_datetime(s, errors="coerce")
 
-    agg = aggregate_fast(
-        start_iso, horizon_h, geo_df, base_int,
-        events=events_df, near_repeat_alpha=0.35,
-        nr_lookback_h=24, nr_radius_m=400, nr_decay_h=12.0,
-        filters=filters,
+@st.cache_data(show_spinner=True, ttl=60*30)  # 30 dk cache
+def load_from_artifact(zip_url: str):
+    """Artifact ZIP indir, gerekli parquet'leri oku."""
+    resp = requests.get(zip_url, timeout=60)
+    resp.raise_for_status()
+    zf = zipfile.ZipFile(io.BytesIO(resp.content))
+    names = zf.namelist()
+
+    # Dosya yolları esnek olsun
+    def pick(name_part):
+        for n in names:
+            if name_part in n and n.endswith(".parquet"):
+                return n
+        return None
+
+    data_fp = pick("fr_crime_09") or pick("fr_crime_10") or pick("fr_crime")  # en zengin ilk
+    metrics_fp = pick("metrics_stacking_ohe")
+
+    if not data_fp:
+        raise FileNotFoundError("ZIP içinde fr_crime_09/10/parquet bulunamadı.")
+
+    df = pd.read_parquet(zf.open(data_fp))
+    metrics = None
+    if metrics_fp:
+        try:
+            metrics = pd.read_parquet(zf.open(metrics_fp))
+        except Exception:
+            metrics = None
+    return df, metrics, names
+
+def pick_last_12m(df, date_col):
+    """Son 12 aya indirger (varsa)."""
+    if date_col is None:
+        return df
+    dts = _to_datetime_safe(df[date_col])
+    max_dt = dts.max()
+    if pd.isna(max_dt):
+        return df
+    start_dt = max_dt - pd.Timedelta(days=365)
+    return df.loc[(dts >= start_dt) & (dts <= max_dt)].copy()
+
+def build_model(train_df, target_col="Y_label", exclude_cols=None, seed=42):
+    """Hızlı bir XGBClassifier kur."""
+    if exclude_cols is None:
+        exclude_cols = []
+    cols_num = train_df.select_dtypes(include=["number", "bool"]).columns.tolist()
+    cols_num = [c for c in cols_num if c != target_col and c not in exclude_cols]
+
+    X = train_df[cols_num]
+    y = train_df[target_col].astype(int)
+
+    # Basit train/test
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.20, random_state=seed, stratify=y if y.nunique()==2 else None
     )
 
-    # 30 günlük referans (opsiyonel)
+    # Hafif model (hızlı)
+    model = XGBClassifier(
+        n_estimators=220,
+        learning_rate=0.06,
+        max_depth=6,
+        subsample=0.85,
+        colsample_bytree=0.85,
+        reg_lambda=1.0,
+        n_jobs=0,
+        random_state=seed,
+        tree_method="hist"
+    )
+    model.fit(X_train, y_train)
+    y_pred = model.predict_proba(X_test)[:, 1]
+    auc = roc_auc_score(y_test, y_pred) if len(np.unique(y_test))==2 else np.nan
+
+    return model, cols_num, float(auc)
+
+@st.cache_resource(show_spinner=True)
+def train_cached(train_df, target_col, exclude_cols):
+    return build_model(train_df, target_col=target_col, exclude_cols=exclude_cols)
+
+# -----------------------------------------------------------
+# 1) Artifact'tan veri yükle
+# -----------------------------------------------------------
+with st.sidebar:
+    st.subheader("⚙️ Veri Kaynağı")
+    zip_url = st.text_input("Artifact ZIP URL", ZIP_URL_DEFAULT)
+    if st.button("🔄 Veriyi İndir & Yükle"):
+        st.session_state["_reload"] = True
+
+# İlk yükleme
+if "_reload" not in st.session_state:
+    st.session_state["_reload"] = True
+
+if st.session_state["_reload"]:
     try:
-        long_start_iso = (datetime.utcnow() + timedelta(hours=SF_TZ_OFFSET - 30 * 24)).replace(minute=0, second=0, microsecond=0).isoformat()
-        agg_long = aggregate_fast(long_start_iso, 30 * 24, geo_df, base_int, events=events_df, near_repeat_alpha=0.0, filters=None)
-    except Exception:
-        agg_long = None
+        df_raw, metrics_df, zip_names = load_from_artifact(zip_url)
+        st.session_state["df_raw"] = df_raw
+        st.session_state["metrics_df"] = metrics_df
+        st.session_state["zip_names"] = zip_names
+        st.session_state["_reload"] = False
+    except Exception as e:
+        st.error(f"Veri indirilemedi: {e}")
+        st.stop()
 
-    agg = ensure_keycol(agg, KEY_COL)
-    if agg_long is not None and not agg_long.empty:
-        agg_long = ensure_keycol(agg_long, KEY_COL)
+df_raw = st.session_state["df_raw"].copy()
+metrics_df = st.session_state.get("metrics_df")
+zip_names = st.session_state.get("zip_names", [])
 
-    return agg, agg_long, start_iso, horizon_h
+with st.expander("ZIP içeriği"):
+    st.code("\n".join(zip_names) or "(boş)")
 
-def top_risky_table(
-    df_agg: pd.DataFrame, n: int, show_ci: bool, start_iso: Optional[str], horizon_h: int
-) -> pd.DataFrame:
-    def poisson_ci(lam: float, z: float = 1.96) -> tuple[float, float]:
-        s = float(np.sqrt(max(lam, 1e-9))); return max(0.0, lam - z * s), lam + z * s
+st.success(f"✅ Veri yüklendi: {df_raw.shape[0]:,} satır × {df_raw.shape[1]:,} sütun")
 
-    cols = [KEY_COL, "expected"] + (["nr_boost"] if "nr_boost" in df_agg.columns else [])
-    df = ensure_keycol(df_agg, KEY_COL)[cols].sort_values("expected", ascending=False).head(n).reset_index(drop=True)
-    lam = df["expected"].to_numpy()
+# -----------------------------------------------------------
+# 2) Sütun tespiti ve son 12 ay filtresi
+# -----------------------------------------------------------
+# Temel kolonlar
+geoid_col = _find_col(df_raw, ["GEOID", "geoid", "Key", "key"], default=None)
+date_col  = _find_col(df_raw, ["date", "Date", "dt", "event_date"], default=None)
+hour_col  = _find_col(df_raw, ["event_hour_x", "event_hour", "hour", "event_hour_y"], default=None)
+cat_col   = _find_col(df_raw, ["category", "Category", "cat"], default=None)
+y_col     = _find_col(df_raw, ["Y_label", "label", "y"], default="Y_label")
 
-    # Prob(≥1)
-    # prob_ge_k utils.forecast içinden
-    df["P(≥1)%"] = [round(prob_ge_k(float(l), 1) * 100, 1) for l in lam]
-
-    # Saat etiketi
-    try:
-        if start_iso:
-            _start = pd.to_datetime(start_iso)
-            _end = _start + pd.to_timedelta(horizon_h, unit="h")
-            df["Saat"] = f"{_start.strftime('%H:%M')}–{_end.strftime('%H:%M')} (SF)"
-        else:
-            df["Saat"] = "-"
-    except Exception:
-        df["Saat"] = "-"
-
-    if show_ci:
-        ci = [poisson_ci(float(l)) for l in lam]
-        df["95% GA"] = [f"[{lo:.2f}, {hi:.2f}]" for lo, hi in ci]
-
-    if "nr_boost" in df.columns:
-        df["NR"] = df["nr_boost"].round(2)
-
-    df["E[olay] (λ)"] = df["expected"].round(2)
-    drop = ["expected"] + (["nr_boost"] if "nr_boost" in df.columns else [])
-    return df.drop(columns=drop)
-
-
-# ─────────────────────────── UI ───────────────────────────
-st.set_page_config(page_title="🔮 Suç Tahmini & Forecast", layout="wide")
-st.markdown(SMALL_UI_CSS, unsafe_allow_html=True)
-st.title("🔮 Suç Tahmini & Forecast")
-
-# Üst bilgi
-LAST_UPDATE_ISO_SF = now_sf_iso()
-st.caption(f"Model: {MODEL_VERSION} • Son eğitim: {MODEL_LAST_TRAIN} • Son güncelleme (SF): {LAST_UPDATE_ISO_SF}")
-
-# GEO katmanı
-GEO_DF, GEO_FEATURES = load_geoid_layer(os.path.join(ROOT, "data", "sf_cells.geojson"))
-GEO_DF = ensure_keycol(GEO_DF, KEY_COL)
-if GEO_DF.empty:
-    st.error("GEOJSON yüklenemedi veya satır yok.")
+if geoid_col is None or y_col not in df_raw.columns:
+    st.error("Gerekli sütunlar yok: en azından GEOID ve Y_label bulunmalı.")
     st.stop()
 
-# Base intensity
-BASE_INT = precompute_base_intensity(GEO_DF)
+df = df_raw.copy()
+df[y_col] = df[y_col].astype(int)
 
-# Artifacts (popup için en sık 3 suç)
-with st.spinner("Geçmiş veriler okunuyor..."):
-    DF10, DF9 = load_artifacts()
-    HIST = DF10 if DF10 is not None and not DF10.empty else (DF9 if DF9 is not None and not DF9.empty else pd.DataFrame())
-TOP3 = top3_by_geoid(HIST)
+# Son 12 ay (varsa date)
+df_12m = pick_last_12m(df, date_col)
+if len(df_12m) < len(df):
+    st.info(f"⏱️ Model eğitimi için son 12 ay seçildi: {len(df_12m):,} satır.")
+else:
+    st.info("⏱️ Tarih sütunu tespit edilemedi veya uygun değil; tüm veri kullanılacak.")
+df_train = df_12m
 
-# Sidebar (yalnızca tahmin sayfasına özel)
+# -----------------------------------------------------------
+# 3) Kenar panel: seçimler
+# -----------------------------------------------------------
 with st.sidebar:
-    st.subheader("Tahmin Kontrolleri", anchor=False)
-    current_time = datetime.now().strftime('%H:%M')
-    current_date = datetime.now().strftime('%Y-%m-%d')
-    ufuk_label = f"Zaman Aralığı (from {current_time}, today, {current_date})"
-    ufuk = st.radio(ufuk_label, ["24s", "48s", "7g"], index=0, horizontal=True)
-    max_h, step = (24, 1) if ufuk == "24s" else (48, 3) if ufuk == "48s" else (7 * 24, 24)
-    start_h, end_h = st.slider("Saat filtresi", 0, max_h, (0, max_h), step=step)
+    st.subheader("🔎 Seçimler")
+    # Kategori seçimi (opsiyonel)
+    cats = sorted(df[cat_col].dropna().unique().tolist()) if cat_col else []
+    cat_sel = st.selectbox("Suç kategorisi", ["(tümü)"] + cats, index=0)
 
-    sel_categories = st.multiselect("Kategori", ["(Hepsi)"] + CATEGORIES, default=[])
-    filters = {"cats": CATEGORIES if sel_categories and "(Hepsi)" in sel_categories else (sel_categories or None)}
-
-    st.markdown("—")
-    show_popups = st.checkbox("Hücre pop-up’larında en çok 3 suç türünü göster", value=True)
-    use_hot_hours = st.checkbox("Geçici hotspot için gün içi saat filtresi", value=False)
-    if use_hot_hours:
-        hot_hours_rng = st.slider("Saat aralığı (hotspot)", 0, 24, (0, 24))
+    # Saat seçimi
+    if hour_col and df[hour_col].notna().any():
+        min_h = int(pd.Series(df[hour_col]).min())
+        max_h = int(pd.Series(df[hour_col]).max())
+        hour_sel = st.slider("Saat (event_hour)", min_value=min(0, min_h), max_value=max(23, max_h), value=12, step=1)
     else:
-        hot_hours_rng = (0, 24)
+        hour_sel = st.slider("Saat (kolon bulunamadı, filtre görsel amaçlı)", 0, 23, 12, 1)
 
-# State
-st.session_state.setdefault("agg", None)
-st.session_state.setdefault("agg_long", None)
-st.session_state.setdefault("start_iso", None)
-st.session_state.setdefault("horizon_h", None)
-st.session_state.setdefault("explain", {})  # {"geoid": ...}
+    # GEOID seçimi
+    geoids = df[geoid_col].dropna().astype(str).unique().tolist()
+    default_geoid = geoids[0] if geoids else ""
+    geoid_sel = st.text_input("GEOID", value=default_geoid)
 
-# Tahmin butonu ve çalıştırma
-colA, colB = st.columns([1, 3])
-with colA:
-    btn_predict = st.button("Tahmin et", type="primary", use_container_width=True)
-with colB:
-    st.caption("Not: Ufuk ve kategori filtresine göre hızlandırılmış agregasyon yapılır.")
+    # Eğitim tetikleyici
+    go_train = st.button("🚀 Modeli Eğit ve Tahmin Yap")
 
-if btn_predict or st.session_state["agg"] is None:
-    with st.spinner("Tahmin hesaplanıyor..."):
-        agg, agg_long, start_iso, horizon_h = run_prediction(start_h, end_h, filters, GEO_DF, BASE_INT)
-        st.session_state.update({
-            "agg": agg,
-            "agg_long": agg_long,
-            "start_iso": start_iso,
-            "horizon_h": horizon_h
-        })
+# -----------------------------------------------------------
+# 4) Veri altkümeleri ve model
+# -----------------------------------------------------------
+# Gösterim filtresi (sadece önizleme ve kullanıcı tahmini için)
+show_df = df.copy()
+if cat_col and cat_sel != "(tümü)":
+    show_df = show_df.loc[show_df[cat_col] == cat_sel]
+if hour_col:
+    show_df = show_df.loc[show_df[hour_col] == hour_sel]
 
-agg = st.session_state.get("agg")
-start_iso = st.session_state.get("start_iso")
-horizon_h = int(st.session_state.get("horizon_h") or 0)
+st.markdown("### 📋 Veri Önizleme")
+st.dataframe(show_df.head(MAX_ROWS_PREVIEW))
 
-# Harita
-st.subheader("Harita", anchor=False)
-if isinstance(agg, pd.DataFrame) and not agg.empty:
-    # build_map_fast: top_counts parametresini destekliyorsa popup gösterir
-    try:
-        m = build_map_fast(
-            df_agg=agg,
-            geo_features=GEO_FEATURES,
-            geo_df=GEO_DF,
-            show_popups=show_popups,
-            top_counts=TOP3,                 # <— en çok 3 suç için
-            show_hotspot=True,
-            perm_hotspot_mode="heat",
-            show_temp_hotspot=True,
-            temp_hotspot_points=pd.DataFrame(columns=["latitude","longitude","weight"]),
-            add_layer_control=False,
-            risk_layer_show=True,
-            perm_hotspot_show=True,
-            temp_hotspot_show=True,
-            risk_layer_name="Tahmin (risk)",
-            perm_hotspot_layer_name="Hotspot (kalıcı)",
-            temp_hotspot_layer_name="Hotspot (geçici)",
-        )
-    except TypeError:
-        # eski imza
-        m = build_map_fast(
-            df_agg=agg,
-            geo_features=GEO_FEATURES,
-            geo_df=GEO_DF,
-            show_popups=show_popups,
-            show_hotspot=True,
-            perm_hotspot_mode="heat",
-            show_temp_hotspot=True,
-            temp_hotspot_points=pd.DataFrame(columns=["latitude","longitude","weight"]),
-        )
+# Eğitim setinden bazı kolonları hariç tut (ID/kimliksel metinler)
+exclude_cols = [c for c in ["id", "ID", "datetime", "received_time", geoid_col] if c in df_train.columns]
 
-    # Varsayılan layer control’ü kaldırıp sade bir zemin ekleyelim
-    for k, ch in list(m._children.items()):
-        if isinstance(ch, folium.map.LayerControl):
-            del m._children[k]
-    folium.TileLayer(
-        tiles="CartoDB positron", name="cartodbpositron", control=True,
-        attr='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> '
-             'contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-    ).add_to(m)
+if go_train:
+    with st.spinner("Model eğitiliyor..."):
+        model, used_cols, auc = train_cached(df_train, target_col=y_col, exclude_cols=exclude_cols)
+    st.success(f"🎯 ROC-AUC: {auc:.3f}" if not math.isnan(auc) else "🎯 ROC-AUC hesaplanamadı")
 
-    # Harita render + tıklama ile geoid yakalama
-    ret = st_folium(m, key="riskmap", height=560, width=None, returned_objects=["last_object_clicked", "last_clicked"])
-    if ret:
-        gid, _ = resolve_clicked_gid(GEO_DF, ret)
-        if gid:
-            st.session_state["explain"] = {"geoid": gid}
+    # Kullanıcı kombinasyonu için örnek satırlar
+    q = df.copy()
+    if cat_col and cat_sel != "(tümü)":
+        q = q.loc[q[cat_col] == cat_sel]
+    if hour_col:
+        q = q.loc[q[hour_col] == hour_sel]
+    if geoid_sel:
+        q = q.loc[q[geoid_col].astype(str) == str(geoid_sel)]
+
+    if len(q) == 0:
+        st.warning("Bu seçimlerle satır bulunamadı. Filteleri genişletmeyi deneyin.")
+    else:
+        # Tahmin
+        # Not: Eğitimde kullandığımız sayısal sütunları alalım; eksikler olursa dolduralım.
+        Xq = q.reindex(columns=used_cols, fill_value=0)
+        try:
+            q_pred = model.predict_proba(Xq)[:, 1]
+        except Exception:
+            # Tür uyuşmazlıkları için emniyet
+            Xq = Xq.apply(pd.to_numeric, errors="coerce").fillna(0)
+            q_pred = model.predict_proba(Xq)[:, 1]
+
+        q = q.iloc[:len(q_pred)].copy()
+        q["risk_score"] = q_pred
+
+        # GEOID bazında özet + metrik (varsa)
+        geo_mean = float(q["risk_score"].mean())
+        st.markdown("### 🔮 Tahmin Sonucu")
+        cols = st.columns(3)
+        cols[0].metric("Seçime göre ortalama risk", f"{geo_mean*100:.1f}%")
+        if metrics_df is not None and geoid_col in metrics_df.columns:
+            m_sub = metrics_df.loc[metrics_df[geoid_col].astype(str) == str(geoid_sel)]
+            # Aday metrik isimleri
+            met_name = _find_col(m_sub, ["f1_score","roc_auc","auc","accuracy"], default=None)
+            if met_name and len(m_sub):
+                mval = float(pd.to_numeric(m_sub[met_name], errors="coerce").dropna().mean())
+                cols[1].metric(f"GEOID başarı ({met_name})", f"{mval:.3f}")
+        cols[2].metric("Satır sayısı (tahmin)", f"{len(q):,}")
+
+        with st.expander("🔎 Detaylı Tahmin Satırları"):
+            st.dataframe(q[[geoid_col] + ([cat_col] if cat_col else []) + ([hour_col] if hour_col else []) + ["risk_score"]].head(1000))
+
+        # Top-N riskli GEOID (seçime göre)
+        topk = (q.groupby(geoid_col)["risk_score"].mean().sort_values(ascending=False).head(10))
+        st.markdown("### 🚨 En Riskli 10 GEOID (mevcut filtrelerle)")
+        st.dataframe(topk.reset_index(names=[geoid_col]).rename(columns={"risk_score":"avg_risk"}))
 
 else:
-    st.info("Önce ‘Tahmin et’ ile bir tahmin üretin.")
+    st.info("Sol panelden seçimleri yapıp **'🚀 Modeli Eğit ve Tahmin Yap'** butonuna basın.")
 
-# Sonuç kartı
-info = st.session_state.get("explain")
-if info and info.get("geoid"):
-    render_result_card(agg, info["geoid"], start_iso, horizon_h)
-else:
-    st.caption("Haritada bir hücreye tıklayın; kart burada görünecek.")
-
-# KPI ve Top-5 tablo
-st.subheader("Risk Özeti", anchor=False)
-a = st.session_state.get("agg")
-if isinstance(a, pd.DataFrame) and not a.empty:
-    kpi_expected = round(float(a["expected"].sum()), 2)
-    tier = a.get("tier", pd.Series(dtype=str))
-    cnts = {
-        "Çok Yüksek": int((tier == "Çok Yüksek").sum()),
-        "Yüksek": int((tier == "Yüksek").sum()),
-        "Orta": int((tier == "Orta").sum()),
-        "Düşük": int((tier == "Düşük").sum()),
-        "Çok Düşük": int((tier == "Çok Düşük").sum()),
-    }
-    render_kpi_row([
-        ("Beklenen olay (ufuk)", kpi_expected, "Seçili zaman ufkunda toplam beklenen olay sayısı"),
-        ("Çok Yüksek", cnts["Çok Yüksek"], "En yüksek riskli hücre sayısı (üst %20)"),
-        ("Yüksek", cnts["Yüksek"], "Yüksek kademe riskli hücre sayısı"),
-        ("Orta", cnts["Orta"], "Orta kademe riskli hücre sayısı"),
-        ("Düşük", cnts["Düşük"], "Düşük kademe riskli hücre sayısı"),
-        ("Çok Düşük", cnts["Çok Düşük"], "En düşük riskli hücre sayısı (alt %20)"),
-    ])
-else:
-    st.info("Önce ‘Tahmin et’ ile bir tahmin üretin.")
-
-st.subheader("Top-5 kritik GEOID", anchor=False)
-if isinstance(a, pd.DataFrame) and not a.empty:
-    tab = top_risky_table(
-        a, n=5, show_ci=True,
-        start_iso=st.session_state.get("start_iso"),
-        horizon_h=int(st.session_state.get("horizon_h") or 0)
-    )
-    st.dataframe(tab, use_container_width=True)
-    st.markdown("Seç / odağı haritada göster:")
-    cols = st.columns(len(tab))
-    for i, row in enumerate(tab.itertuples()):
-        with cols[i]:
-            if st.button(str(row.geoid)):
-                st.session_state["explain"] = {"geoid": str(row.geoid)}
-                st.experimental_rerun()
-    st.caption("Butona tıklayınca haritada centroid işaretlenir ve açıklama kartı güncellenir.")
-else:
-    st.caption("Tablo, bir tahmin üretildiğinde gösterilir.")
-
-# Isı matrisi
-st.subheader("Gün × Saat Isı Matrisi", anchor=False)
-if isinstance(a, pd.DataFrame) and not a.empty and st.session_state.get("start_iso"):
-    H = int(st.session_state.get("horizon_h") or 24)
-    # events_df opsiyonel – utils.heatmap, agg ve base_int ile çalışır
-    try:
-        from utils.reports import load_events  # type: ignore
-        events_src = load_events(os.path.join(ROOT, "data", "events.csv"))
-    except Exception:
-        events_src = pd.DataFrame()
-    render_day_hour_heatmap(
-        agg=st.session_state["agg"],
-        start_iso=st.session_state["start_iso"],
-        horizon_h=H,
-        geo_df=GEO_DF,
-        base_int=BASE_INT,
-        filters={"cats": CATEGORIES},  # burada geniş gösteriyoruz; istersen sidebar filtresini verebilirsin
-        events_df=events_src,
-    )
-else:
-    st.caption("Isı matrisi, bir tahmin üretildiğinde gösterilir.")
+# -----------------------------------------------------------
+# Bitiş
+# -----------------------------------------------------------
+st.caption("Not: Bu sayfa demo amaçlıdır. Özellik mühendisliği, sınıf dengesi ve zaman bağımlılığı üretim seviyesinde optimize edilmelidir.")
