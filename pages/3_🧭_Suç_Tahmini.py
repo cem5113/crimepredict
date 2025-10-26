@@ -917,7 +917,25 @@ if "prob_adj" not in fc.columns:
     fc["prob_adj"] = fc.get("prob", 0.0)
 
 # Top-3 özet (ayarlı olasılık ile)
-geoids_in_scope = sel_geoids if sel_geoids else all_geoids
+def _geoids_from_geojson(gj_dict: dict) -> list[str]:
+    feats = (gj_dict or {}).get("features", [])
+    out = []
+    for f in feats:
+        props = (f.get("properties") or {})
+        raw = next((props.get(k) for k in ("geoid","GEOID","cell_id","id") if k in props), None)
+        if raw is None:
+            continue
+        g = ''.join(ch for ch in str(raw) if str(ch).isdigit()).zfill(11)[:11]
+        if g:
+            out.append(g)
+    return sorted(set(out))
+
+# GeoJSON'u (zaten birazdan harita için de kullanacağız) alıp kapsamı belirle
+gj_probe = fetch_geojson_smart(GEOJSON_PATH_LOCAL_DEFAULT, GEOJSON_PATH_LOCAL_DEFAULT, RAW_GEOJSON_OWNER, RAW_GEOJSON_REPO)
+all_geoids_map = _geoids_from_geojson(gj_probe)
+
+geoids_in_scope = sel_geoids if sel_geoids else all_geoids_map
+
 fc_for_summary = fc.copy()
 fc_for_summary["prob"] = fc_for_summary["prob_adj"]
 summary_top3 = summarize_top3(fc_for_summary, geoid_list=geoids_in_scope)
@@ -960,14 +978,17 @@ with col_map:
         pickable=True,
         opacity=0.65,
     )
+
     tooltip = {
         "html": (
             "<b>GEOID:</b> {display_id}<br/>"
-            "<b>Top-3 (pay • saat blokları):</b><br/>{top3_html}"
+            "<b>Risk:</b> {risk_level_label}"
+            "<br/><b>Top-3 (pay • saat blokları):</b><br/>{top3_html}"
             "<br/><i>Nowcast düzeltmesi aktifse: Top-3 payları nowcast ile harmanlanmıştır.</i>"
         ),
         "style": {"backgroundColor":"#262730", "color":"white"},
     }
+
     deck = pdk.Deck(
         layers=[layer],
         initial_view_state=pdk.ViewState(latitude=37.7749, longitude=-122.4194, zoom=10),
