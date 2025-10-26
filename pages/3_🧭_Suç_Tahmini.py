@@ -1,5 +1,23 @@
 # pages/3_🧭_Suç_Tahmini.py
 from __future__ import annotations
+
+# --- bootstrap: pages/ içinden kök modülleri görebilmek için ---
+import sys, pathlib
+HERE = pathlib.Path(__file__).resolve()
+ROOT = HERE.parents[1]  # projenin kökü (pages'in bir üstü)
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+# Güvenli constants import'u (fallback'lı)
+try:
+    from utils.constants import SF_TZ_OFFSET, KEY_COL, MODEL_VERSION, MODEL_LAST_TRAIN, CATEGORIES
+except Exception:
+    SF_TZ_OFFSET  = -7
+    KEY_COL       = "geoid"
+    MODEL_VERSION = "v0"
+    MODEL_LAST_TRAIN = "-"
+    CATEGORIES    = ["Assault","Burglary","Robbery","Theft","Vandalism","Vehicle Theft"]
+
 import os, io, zipfile, requests
 from datetime import datetime
 import pandas as pd
