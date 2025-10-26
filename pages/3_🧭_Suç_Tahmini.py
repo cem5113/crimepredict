@@ -25,7 +25,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 # ── local modules
-from utils.geo import load_geoid_layer, resolve_clicked_gid
+from components.geo import load_geoid_layer, resolve_clicked_gid
 from utils.forecast import precompute_base_intensity, aggregate_fast, prob_ge_k
 from utils.ui import (
     SMALL_UI_CSS, render_result_card, build_map_fast,
