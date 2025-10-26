@@ -417,6 +417,13 @@ def build_map_fast(
         features.append(f)
     fc = {"type": "FeatureCollection", "features": features}
 
+    df_agg.columns = [c.strip() for c in df_agg.columns]
+    if "geoid" not in df_agg.columns:
+        for alt in ("GEOID","id","geoid_x","geoid_y"):
+            if alt in df_agg.columns:
+                df_agg = df_agg.rename(columns={alt:"geoid"})
+                break
+
     # Style
     def style_fn(feat):
         gid_val = feat.get("properties", {}).get("id")
