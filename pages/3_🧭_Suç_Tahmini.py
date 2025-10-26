@@ -19,10 +19,10 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 # ── local modules
-from utils.geo import load_geoid_layer, resolve_clicked_gid
-from utils.forecast import precompute_base_intensity, aggregate_fast, prob_ge_k
-from utils.patrol import allocate_patrols
-from utils.ui import (
+from components.utils.geo import load_geoid_layer, resolve_clicked_gid
+from components.utils.forecast import precompute_base_intensity, aggregate_fast, prob_ge_k
+from components.utils.patrol import allocate_patrols
+from components.utils.ui import (
     SMALL_UI_CSS,
     render_result_card,
     build_map_fast,
@@ -32,7 +32,7 @@ from utils.ui import (
 
 # utils/heatmap varsa onu kullan, yoksa ui.py'deki fallback'i kullan
 try:
-    from utils.heatmap import render_day_hour_heatmap  # type: ignore
+    from components.utils.heatmap import render_day_hour_heatmap  # type: ignore
 except Exception:
     render_day_hour_heatmap = _fallback_heatmap
 
@@ -47,13 +47,13 @@ except ModuleNotFoundError:
 
 # pydeck (optional)
 try:
-    from utils.deck import build_map_fast_deck  # type: ignore
+    from components.utils.deck import build_map_fast_deck  # type: ignore
 except ImportError:
     build_map_fast_deck = None
 
 # events loader (fallback)
 try:
-    from utils.reports import load_events  # type: ignore
+    from component.utils.reports import load_events  # type: ignore
 except Exception:
     def load_events(path: str) -> pd.DataFrame:
         try:
@@ -384,7 +384,7 @@ if sekme == "Operasyon":
         if isinstance(agg, pd.DataFrame):
             if "neighborhood" not in agg.columns and "neighborhood" in GEO_DF.columns:
                 try:
-                    from utils.geo import join_neighborhood
+                    from components.utils.geo import join_neighborhood
                     agg = join_neighborhood(agg, GEO_DF)
                 except Exception:
                     pass
