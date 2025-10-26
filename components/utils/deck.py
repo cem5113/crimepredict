@@ -1,5 +1,11 @@
 # utils/deck.py
 from __future__ import annotations
+
+try:
+    from components.utils.constants import KEY_COL_ALIASES  # ["geoid","GEOID","id", ...]
+except Exception:
+    KEY_COL_ALIASES = ["geoid", "GEOID", "id", "Id", "ID"]
+    
 import json
 from typing import Optional, Dict, Any, List
 
@@ -62,6 +68,44 @@ def color_for(level: Optional[str], *,
 
 
 # ───────────────────────────── Yardımcılar ─────────────────────────────
+def _coerce_keycol(df: pd.DataFrame, key: str = KEY_COL) -> pd.DataFrame:
+    """Gelen df’de KEY_COL yoksa, KEY_COL_ALIASES içinden ilk eşleşeni KEY_COL’a çevirir."""
+    if df is None or df.empty:
+        return df
+    if key in df.columns:
+        df[key] = df[key].astype(str)
+        return df
+    # alt isimlerden birine göre rename
+    lowmap = {str(c).lower(): c for c in df.columns}
+    for alt in KEY_COL_ALIASES:
+        if alt in df.columns:
+            out = df.rename(columns={alt: key}).copy()
+            out[key] = out[key].astype(str)
+            return out
+        if alt.lower() in lowmap:
+            out = df.rename(columns={lowmap[alt.lower()]: key}).copy()
+            out[key] = out[key].astype(str)
+            return out
+    # bulunamazsa dokunma (katmanlar graceful degrade edecek)
+    return df
+
+def _pick_metric_col(df: pd.DataFrame) -> str | None:
+    """
+    Risk göstergesi olarak kullanılacak metrik adını otomatik seç.
+    Öncelik: pred_expected > expected > risk_score > prob > score > y_pred > y_proba
+    """
+    if df is None or df.empty:
+        return None
+    prefs = ["pred_expected", "expected", "risk_score", "prob", "score", "y_pred", "y_proba"]
+    names = {c.lower(): c for c in df.columns}
+    for p in prefs:
+        if p in df.columns:
+            return p
+        if p in names:
+            return names[p]
+    # hiçbiri yoksa None
+    return None
+
 def _ensure_cols(df: pd.DataFrame) -> pd.DataFrame:
     """
     Garanti eder:
@@ -156,6 +200,22 @@ def build_map_fast_deck(
     override_palette: Optional[Dict[str, List[int]]] = None
 ) -> pdk.Deck:
 
+    # --- Normalize: KEY_COL & kolon adları farklılıklarına karşı esneklik ---
+    if isinstance(df_agg, pd.DataFrame):
+        df_agg = _coerce_keycol(df_agg, KEY_COL).copy()
+        # boşluk/aksan problemlerini azaltmak için sadece strip yeterli
+        df_agg.columns = [str(c).strip() for c in df_agg.columns]
+    if isinstance(geo_df, pd.DataFrame):
+        geo_df = _coerce_keycol(geo_df, KEY_COL).copy()
+        geo_df.columns = [str(c).strip() for c in geo_df.columns]
+        # centroid kolonları bazen farklı gelebilir; olası alternatifleri toparla
+        alt_lat = next((c for c in geo_df.columns if c.lower() in ("centroid_lat","lat","latitude")), None)
+        alt_lon = next((c for c in geo_df.columns if c.lower() in ("centroid_lon","lon","lng","longitude")), None)
+        if alt_lat and "centroid_lat" not in geo_df.columns:
+            geo_df = geo_df.rename(columns={alt_lat: "centroid_lat"})
+        if alt_lon and "centroid_lon" not in geo_df.columns:
+            geo_df = geo_df.rename(columns={alt_lon: "centroid_lon"})
+    
     # Tema: mapbox stilinden dark olup olmadığını sez
     _is_dark = str(map_style).endswith("dark-v11")
 
