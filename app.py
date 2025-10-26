@@ -5,36 +5,31 @@ import os
 import traceback
 import streamlit as st
 
-# Proje bileşenleri (normal import)
+# ── Proje bileşenleri
 from components.config import APP_NAME, APP_ROLE, DATA_REPO, DATA_BRANCH
 from components.last_update import show_last_update_badge
 from components.meta import MODEL_VERSION, MODEL_LAST_TRAIN
 from components.gh_data import raw_url, download_actions_artifact_zip, unzip
 
-# ── Sayfa ayarları: TEK ve İLK Streamlit komutu
-st.set_page_config(
-    page_title=APP_NAME,
-    page_icon="🧭",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-# Başlık
-st.title(APP_NAME)
-st.caption(f"Rol: {APP_ROLE}")
+# ── Sayfa ayarları
+st.set_page_config(page_title=APP_NAME, layout="wide")
 
 # ── Yardımcı: GitHub token çözümleyici
 def resolve_and_set_github_token() -> str | None:
     """
-    Öncelik:
-      1) os.environ['GITHUB_TOKEN']
-      2) st.secrets['github_token'] | 'GH_TOKEN' | 'GITHUB_TOKEN'
-    Bulursa os.environ['GITHUB_TOKEN'] olarak yazar.
+    Aşağıdaki öncelikle token'ı bulur:
+      1) os.environ["GITHUB_TOKEN"]
+      2) st.secrets["github_token"]
+      3) st.secrets["GH_TOKEN"]
+      4) st.secrets["GITHUB_TOKEN"]
+    Bulursa os.environ["GITHUB_TOKEN"] içine yazar (modüller için tek doğruluk kaynağı).
     """
+    # 1) Halihazırda env'de varsa aynen kullan
     env_tok = os.getenv("GITHUB_TOKEN")
     if env_tok:
         return env_tok
 
+    # 2-4) Secrets içinden olası anahtar adlarıyla ara
     cand = None
     try:
         if "github_token" in st.secrets:
@@ -44,6 +39,7 @@ def resolve_and_set_github_token() -> str | None:
         elif "GITHUB_TOKEN" in st.secrets:
             cand = st.secrets["GITHUB_TOKEN"]
     except Exception:
+        # Streamlit dışı koşullarda st.secrets erişimi hata verebilir; sessiz geç
         cand = None
 
     if cand:
@@ -51,6 +47,10 @@ def resolve_and_set_github_token() -> str | None:
         return str(cand)
 
     return None
+
+# ── Başlık
+st.title(APP_NAME)
+st.caption(f"Rol: {APP_ROLE}")
 
 # ── GitHub Token senkronu
 token = resolve_and_set_github_token()
@@ -61,6 +61,7 @@ with st.expander("🔐 Bağlantı & Token Tanılama", expanded=token is None):
 
     cols = st.columns(3)
     cols[0].metric("Token bulundu mu?", "Evet" if bool(token) else "Hayır")
+    # Güvenlik: token'ı asla düz metin olarak göstermiyoruz.
     cols[1].metric("Env'de GITHUB_TOKEN", "Evet" if bool(os.getenv("GITHUB_TOKEN")) else "Hayır")
     cols[2].metric("Secrets erişimi", "Evet" if "secrets" in dir(st) else "Bilinmiyor")
 
@@ -72,16 +73,17 @@ with st.expander("🔐 Bağlantı & Token Tanılama", expanded=token is None):
             '```toml\ngithub_token = "github_pat_xxx..."\n```'
         )
     else:
-        st.success("Token ayarlandı. Modüller `os.getenv('GITHUB_TOKEN')` üzerinden okuyabilir.")
+        st.success("Token başarıyla ayarlandı. (modüller `os.getenv('GITHUB_TOKEN')` üzerinden okuyabilir)")
 
 # ── Yönlendirme / Pages kısa yolları
 st.info("🗺️ Haritaya gitmek için aşağıdaki sayfayı açabilirsin.")
-links = st.columns([1, 1, 2])
+links = st.columns([1,1,2])
 with links[0]:
     try:
-        st.page_link("pages/3_🔮_Suç_Tahmini_ve_Forecast.py", label="🔮 Suç Tahmini", icon="🔮")
+        # Streamlit 1.30+ için
+        st.page_link("pages/3_🔮_Suç_Tahmini.py",   label="🔮 Suç Tahmini", icon="🔮")
     except Exception:
-        st.write("`pages/3_🔮_Suç_Tahmini_ve_Forecast.py` hazırsa soldaki **Pages** menüsünden ulaşabilirsin.")
+        st.write("`pages/01_🧭_Suç_Tahmini.py` hazırsa soldaki **Pages** menüsünden ulaşabilirsin.")
 
 with links[1]:
     try:
