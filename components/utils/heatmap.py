@@ -1,12 +1,12 @@
-# utils/heatmap.py
+# components.utils/heatmap.py
 from __future__ import annotations
 from typing import Optional, Dict
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-from utils.constants import SF_TZ_OFFSET
-from utils.forecast import aggregate_fast
+from components.utils.constants import SF_TZ_OFFSET
+from components.utils.forecast import aggregate_fast
 
 def _safe_float_sum(series: pd.Series) -> float:
     return float(pd.to_numeric(series, errors="coerce")
