@@ -53,8 +53,9 @@ def resolve_github_token() -> str | None:
 
 @st.cache_data(show_spinner=True)
 @st.cache_data(show_spinner=True)
+@st.cache_data(show_spinner=True)
 def load_artifact_data() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """GitHub Actions artifact'tan fr_crime_09.csv ve metrics_stacking_ohe.parquet indirir."""
+    """GitHub Actions artifact'tan fr_crime_09.csv ve metrics_stacking_ohe.parquet indirir (nested zip destekli)."""
     token = resolve_github_token()
     if not token:
         st.error("GitHub Token bulunamadı (GH_TOKEN veya GITHUB_TOKEN).")
@@ -74,37 +75,45 @@ def load_artifact_data() -> tuple[pd.DataFrame, pd.DataFrame]:
         for rid in run_ids:
             arts_url = f"https://api.github.com/repos/{OWNER}/{REPO}/actions/runs/{rid}/artifacts"
             arts = requests.get(arts_url, headers=headers, timeout=30).json().get("artifacts", [])
-            target = next((a for a in arts if a["name"] == ARTIFACT_NAME and not a["expired"]), None)
-            if target:
-                download_url = target["archive_download_url"]
-                zdata = requests.get(download_url, headers=headers, timeout=60).content
-                zf = zipfile.ZipFile(io.BytesIO(zdata))
+            target = next((a for a in arts if a["name"] == "fr-crime-outputs-parquet" and not a["expired"]), None)
+            if not target:
+                continue
 
-                # 3️⃣ İçteki ZIP (bazı pipeline’lar nested zip üretir)
-                inner_zip = [n for n in zf.namelist() if n.endswith(".zip")]
-                if inner_zip:
-                    nested = zipfile.ZipFile(io.BytesIO(zf.read(inner_zip[0])))
-                    names = nested.namelist()
-                    csv_name = next((n for n in names if "fr_crime_09" in n.lower()), names[0])
-                    df = pd.read_csv(io.BytesIO(nested.read(csv_name)))
-                    metrics_name = next((n for n in names if "metrics_stacking_ohe" in n.lower()), None)
-                    metrics = pd.read_parquet(io.BytesIO(nested.read(metrics_name))) if metrics_name else pd.DataFrame()
-                    return df, metrics
-                else:
-                    # doğrudan dosyalar zip içinde olabilir
-                    names = zf.namelist()
-                    csv_name = next((n for n in names if "fr_crime_09" in n.lower()), names[0])
-                    df = pd.read_csv(io.BytesIO(zf.read(csv_name)))
-                    metrics_name = next((n for n in names if "metrics_stacking_ohe" in n.lower()), None)
-                    metrics = pd.read_parquet(io.BytesIO(zf.read(metrics_name))) if metrics_name else pd.DataFrame()
-                    return df, metrics
-        st.error("Artifact bulunamadı veya içi boş.")
+            # 3️⃣ Artifact indir
+            download_url = target["archive_download_url"]
+            zdata = requests.get(download_url, headers=headers, timeout=60).content
+            outer = zipfile.ZipFile(io.BytesIO(zdata))
+
+            # 4️⃣ İçteki zip'i bul
+            inner_zip_name = next((n for n in outer.namelist() if n.endswith(".zip")), None)
+            if not inner_zip_name:
+                st.error("İç zip (fr_parquet_outputs.zip) bulunamadı.")
+                return pd.DataFrame(), pd.DataFrame()
+
+            nested = zipfile.ZipFile(io.BytesIO(outer.read(inner_zip_name)))
+            names = nested.namelist()
+
+            # 5️⃣ Dosyaları bul
+            csv_name = next((n for n in names if "fr_crime_09" in n.lower()), None)
+            metrics_name = next((n for n in names if "metrics_stacking_ohe" in n.lower()), None)
+
+            if not csv_name:
+                st.error("fr_crime_09.csv bulunamadı.")
+                return pd.DataFrame(), pd.DataFrame()
+
+            df = pd.read_csv(io.BytesIO(nested.read(csv_name)))
+            metrics = pd.read_parquet(io.BytesIO(nested.read(metrics_name))) if metrics_name else pd.DataFrame()
+
+            st.success(f"✅ Artifact başarıyla yüklendi: {csv_name}")
+            return df, metrics
+
+        st.error("Uygun artifact bulunamadı.")
         return pd.DataFrame(), pd.DataFrame()
 
     except Exception as e:
-        st.error(f"Artifact indirilemedi: {e}")
+        st.error(f"Artifact indirilemedi veya açılırken hata: {e}")
         return pd.DataFrame(), pd.DataFrame()
-
+        
 df, metrics = load_artifact_data()
 
 # ───────────────────────────────
