@@ -1,6 +1,13 @@
 # pages/3_🔮_Suç_Tahmini_ve_Forecast.py
 from __future__ import annotations
-import os, sys, io, zipfile
+import os, sys
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from components.meta import SF_TZ_OFFSET, KEY_COL, MODEL_VERSION, MODEL_LAST_TRAIN, CATEGORIES
+
+import io, zipfile
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
