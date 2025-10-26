@@ -1,5 +1,6 @@
 # pages/2_🗺️_Risk_Haritası.py
 import io, os, json, zipfile
+from typing import Optional
 from datetime import date
 import pandas as pd
 import streamlit as st
