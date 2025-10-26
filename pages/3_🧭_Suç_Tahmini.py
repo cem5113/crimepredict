@@ -86,21 +86,70 @@ def resolve_github_token() -> str | None:
     tok = os.getenv("GITHUB_TOKEN")
     if tok:
         return tok
-    for k in ("github_token", "GH_TOKEN", "GITHUB_TOKEN"):
-        try:
+    # Streamlit secrets güvenli kontrol
+    try:
+        for k in ("github_token", "GH_TOKEN", "GITHUB_TOKEN"):
             if k in st.secrets and st.secrets[k]:
                 os.environ["GITHUB_TOKEN"] = str(st.secrets[k])
                 return os.environ["GITHUB_TOKEN"]
-        except Exception:
-            pass
+    except Exception:
+        pass
     return None
 
 def gh_headers() -> dict:
-    hdrs = {"Accept": "application/vnd.github+json"}
+    hdrs = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "sutam-forecast-ui"
+    }
     tok = os.getenv("GITHUB_TOKEN")
     if tok:
         hdrs["Authorization"] = f"Bearer {tok}"
     return hdrs
+
+def _read_parquet_or_raise(filelike) -> pd.DataFrame:
+    try:
+        return pd.read_parquet(filelike)
+    except Exception as e:
+        raise RuntimeError(
+            "Parquet okunamadı. PyArrow/fastparquet eksik olabilir. "
+            "requirements.txt içine 'pyarrow' ekleyin. Orijinal hata: " + str(e)
+        )
+
+@st.cache_data(show_spinner=True, ttl=15*60)
+def read_parquet_from_artifact(owner: str, repo: str, wanted_suffix: str, artifact_name: str | None = None) -> pd.DataFrame:
+    zip_bytes = fetch_latest_artifact_zip(owner, repo, artifact_name)
+    def _read_from_zip(zb: bytes) -> pd.DataFrame | None:
+        with zipfile.ZipFile(io.BytesIO(zb)) as zf:
+            memlist = zf.namelist()
+
+            # 1) Parquet arayalım
+            matches = [n for n in memlist if n.endswith("/"+wanted_suffix) or n.endswith(wanted_suffix)]
+            if matches:
+                with zf.open(matches[0]) as f:
+                    return _read_parquet_or_raise(f)
+
+            # 2) İç ZIP'lere dal
+            inner_zips = [n for n in memlist if n.lower().endswith(".zip")]
+            for iz in inner_zips:
+                with zf.open(iz) as f:
+                    inner_bytes = f.read()
+                got = _read_from_zip(inner_bytes)
+                if got is not None:
+                    return got
+
+            # 3) Parquet yoksa CSV fallback (aynı isim gövdesiyle)
+            csv_cand = [n for n in memlist if n.lower().endswith(".csv")]
+            if csv_cand:
+                with zf.open(csv_cand[0]) as f:
+                    return pd.read_csv(f)
+        return None
+    df = _read_from_zip(zip_bytes)
+    if df is None:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            raise FileNotFoundError(f"Zip içinde {wanted_suffix} veya CSV fallback bulunamadı. Örnek içerik: {zf.namelist()[:20]}")
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
 
 @st.cache_data(show_spinner=True, ttl=15*60)
 def fetch_latest_artifact_zip(owner: str, repo: str, artifact_name: str | None = None) -> bytes:
@@ -125,45 +174,6 @@ def fetch_latest_artifact_zip(owner: str, repo: str, artifact_name: str | None =
     r2.raise_for_status()
     return r2.content
 
-# --- ÖNEMLİ DÜZELTME: İç ZIP'leri otomatik bulan genel okuyucu ---
-@st.cache_data(show_spinner=True, ttl=15*60)
-def read_parquet_from_artifact(owner: str, repo: str, wanted_suffix: str, artifact_name: str | None = None) -> pd.DataFrame:
-    """
-    Artifact ZIP'inde aranan dosya son eki (wanted_suffix) ile eşleşen Parquet'i okur.
-    Eğer artifact içinde bir veya daha fazla *iç ZIP* varsa (örn. fr_parquet_outputs.zip),
-    bunların içine de bakar ve eşleşeni bulursa okur.
-    """
-    zip_bytes = fetch_latest_artifact_zip(owner, repo, artifact_name)
-
-    def _read_from_zip(zb: bytes) -> pd.DataFrame | None:
-        with zipfile.ZipFile(io.BytesIO(zb)) as zf:
-            memlist = zf.namelist()
-            # 1) Doğrudan dosyayı ara
-            matches = [n for n in memlist if n.endswith("/"+wanted_suffix) or n.endswith(wanted_suffix)]
-            if matches:
-                with zf.open(matches[0]) as f:
-                    df = pd.read_parquet(f)
-                df.columns = [str(c).strip() for c in df.columns]
-                return df
-            # 2) İç ZIP varsa, içine dal (örn. fr_parquet_outputs.zip)
-            inner_zips = [n for n in memlist if n.lower().endswith(".zip")]
-            for iz in inner_zips:
-                with zf.open(iz) as f:
-                    inner_bytes = f.read()
-                try:
-                    df = _read_from_zip(inner_bytes)
-                    if df is not None:
-                        return df
-                except Exception:
-                    pass
-        return None
-
-    df = _read_from_zip(zip_bytes)
-    if df is None:
-        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-            raise FileNotFoundError(f"Zip içinde {wanted_suffix} yok. Örnek içerik: {zf.namelist()[:20]}")
-    return df
-
 # --- İsteğe bağlı: İç ZIP adı + iç yol biliniyorsa doğrudan okuyucu ---
 @st.cache_data(show_spinner=True, ttl=15*60)
 def read_parquet_from_nested_artifact(
@@ -173,7 +183,6 @@ def read_parquet_from_nested_artifact(
     inner_path_in_zip: str,        # örn. 'fr_crime_10.parquet'
     artifact_name: str | None = None
 ) -> pd.DataFrame:
-    zip_bytes = fetch_latest_artifact_zip(owner, repo, artifact_name)
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as outer:
         members = outer.namelist()
         cand = [n for n in members if n.endswith("/"+inner_zip_name) or n.endswith(inner_zip_name)]
@@ -188,7 +197,7 @@ def read_parquet_from_nested_artifact(
         if not targets:
             raise FileNotFoundError(f"{inner_zip_name} içinde {inner_path_in_zip} yok. İçerik örneği: {inner_members[:20]}")
         with inner.open(targets[0]) as f:
-            df = pd.read_parquet(f)
+            df = _read_parquet_or_raise(f)
 
     df.columns = [str(c).strip() for c in df.columns]
     return df
@@ -251,19 +260,32 @@ def fetch_geojson_smart(path_local: str, path_in_zip: str, raw_owner: str, raw_r
 
 # ---------- Veri hazırlık ----------
 def ensure_datetime(df: pd.DataFrame) -> pd.DataFrame:
-    if "datetime" in df.columns:
-        df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
-    elif "date" in df.columns and "event_hour" in df.columns:
-        df["datetime"] = pd.to_datetime(df["date"].astype(str) + " " + df["event_hour"].astype(str) + ":00:00", errors="coerce")
+    d = df.copy()
+    # 1) datetime varsa doğrudan
+    if "datetime" in d.columns:
+        d["datetime"] = pd.to_datetime(d["datetime"], utc=True, errors="coerce")
     else:
-        if "date" in df.columns:
-            df["datetime"] = pd.to_datetime(df["date"], errors="coerce")
+        # 2) date + time
+        if "date" in d.columns and "time" in d.columns:
+            d["datetime"] = pd.to_datetime(
+                d["date"].astype(str) + " " + d["time"].astype(str),
+                utc=True, errors="coerce"
+            )
+        # 3) date + event_hour_x/y
+        elif "date" in d.columns and any(c in d.columns for c in ("event_hour","event_hour_x","event_hour_y")):
+            eh = next((c for c in ("event_hour","event_hour_x","event_hour_y") if c in d.columns), None)
+            d["datetime"] = pd.to_datetime(
+                d["date"].astype(str) + " " + d[eh].astype(str) + ":00:00",
+                utc=True, errors="coerce"
+            )
         else:
-            df["datetime"] = pd.to_datetime(df.index, errors="coerce")
-    df["date"] = df["datetime"].dt.date
-    df["hour"] = df["datetime"].dt.hour
-    df["dow"] = df["datetime"].dt.dayofweek  # 0=Mon
-    return df
+            # 4) son çare: index'ten dene
+            d["datetime"] = pd.to_datetime(d.index, utc=True, errors="coerce")
+
+    d["date"] = d["datetime"].dt.date
+    d["hour"] = d["datetime"].dt.hour
+    d["dow"] = d["datetime"].dt.dayofweek
+    return d
 
 def normalize_geoid(x) -> str:
     s = ''.join(ch for ch in str(x) if str(ch).isdigit())
@@ -401,9 +423,10 @@ def summarize_top3(fc: pd.DataFrame, geoid_list: List[str]) -> pd.DataFrame:
 # ---------- Harita zenginleştirme ----------
 COLOR_MAP = {
     "çok düşük": [200,200,200],
-    "düşük": [56,168,0],
-    "orta": [255,221,0],
-    "yüksek": [204,0,0],
+    "düşük":     [56,168,0],
+    "orta":      [255,221,0],
+    "yüksek":    [255,140,0],
+    "çok yüksek":[204,0,0],
 }
 
 def only_digits(s: str) -> str:
@@ -413,42 +436,40 @@ def inject_properties_top3(geojson_dict: dict, top3_df: pd.DataFrame, risk_daily
     if not geojson_dict:
         return geojson_dict
     feats = geojson_dict.get("features", [])
-    tmap: Dict[str, pd.DataFrame] = {
-        g: sub.sort_values("rank").reset_index(drop=True)
-        for g, sub in top3_df.groupby("geoid")
-    }
-    rmap = None
+    tmap = {g: sub.sort_values("rank").reset_index(drop=True) for g, sub in top3_df.groupby("geoid")}
+    rmap, q25, q50, q75 = None, None, None, None
     if risk_daily_df is not None and not risk_daily_df.empty:
         rmap = risk_daily_df.set_index("geoid")["risk_score_daily"].to_dict()
-        if not risk_daily_df.empty:
-            q25, q50, q75 = (
-                risk_daily_df["risk_score_daily"].quantile([0.25,0.5,0.75]).tolist()
-            )
+        q25, q50, q75 = risk_daily_df["risk_score_daily"].quantile([0.25,0.5,0.75]).tolist()
+
+    def level_of(v: float) -> str:
+        if q25 is None: return "orta"
+        if v <= q25: return "düşük"
+        if v <= q50: return "orta"
+        if v <= q75: return "yüksek"
+        return "çok yüksek"
+
     out = []
     for feat in feats:
         props = (feat.get("properties") or {}).copy()
         raw = next((props[k] for k in ("geoid","GEOID","cell_id","id") if k in props), None)
-        geoid = only_digits(raw)[:11] if raw is not None else ""
+        geoid = ''.join(ch for ch in str(raw or "") if str(ch).isdigit())[:11]
         props.setdefault("display_id", str(raw or ""))
 
-        # risk renkleri (varsa)
-        lvl = "orta"
         if rmap is not None and geoid in rmap:
             val = float(rmap[geoid])
             props["risk_score_daily"] = val
-            if val <= q25: lvl = "düşük"
-            elif val <= q50: lvl = "orta"
-            elif val <= q75: lvl = "yüksek"
-            else: lvl = "yüksek"
+            lvl = level_of(val)
+        else:
+            lvl = "orta"
         props["fill_color"] = COLOR_MAP.get(lvl, [220,220,220])
 
-        # Top-3 kategori + saat blokları
         if geoid in tmap:
             sub = tmap[geoid]
             lines = []
             for _, rr in sub.iterrows():
                 pct = f"{rr['share']*100:.1f}%"
-                ph = rr["peak_hours"]
+                ph = rr.get("peak_hours","—")
                 lines.append(f"{rr['rank']}. {rr['category']} • {pct} • {ph}")
             props["top3_html"] = "<br/>".join(lines)
         else:
@@ -568,7 +589,10 @@ try:
             if "geoid" not in df_nowcast.columns:
                 for alt in ("cell_id","geoid10","geoid_10","id"):
                     if alt in df_nowcast.columns:
-                        df_nowcast["geoid"] = df_nowcast[alt]; break
+                        df_nowcast["geoid"] = df_nowcast[alt]
+                        break
+            if "geoid" not in df_nowcast.columns:
+                df_nowcast["geoid"] = ""
             # zaman alanları
             if "datetime" in df_nowcast.columns:
                 df_nowcast["datetime"] = pd.to_datetime(df_nowcast["datetime"], errors="coerce")
@@ -586,8 +610,19 @@ try:
             if score_col is None:
                 numeric_cols = [c for c in df_nowcast.columns if pd.api.types.is_numeric_dtype(df_nowcast[c])]
                 score_col = numeric_cols[0] if numeric_cols else None
-            df_nowcast["geoid"] = df_nowcast["geoid"].map(normalize_geoid) if "geoid" in df_nowcast.columns else ""
-
+            df_nowcast["geoid"] = df_nowcast["geoid"].map(normalize_geoid)
+            _invalid_all = df_nowcast["geoid"].isna().all() or (df_nowcast["geoid"] == "00000000000").all()
+            if _invalid_all:
+                df_nowcast = pd.DataFrame()  # böylece aşağıda use_nowcast koşulu ile harman yapılmaz
+            
+            # metrikler
+            metrics_name = _find_first_by_patterns(
+                sf_members,
+                patterns=[
+                    r"(?:^|/)(stacking|model).*metrics.*\.json$",
+                    r"(?:^|/)metrics.*\.json$"
+                ]
+            )
         # metrikler
         metrics_name = _find_first_by_patterns(
             sf_members,
@@ -622,18 +657,32 @@ all_geoids = sorted(df_events["geoid"].dropna().unique().tolist())
 
 # ---------- Sidebar Filtreleri ----------
 st.sidebar.header("Filtreler")
-sel_cats = st.sidebar.multiselect("Suç kategorileri", options=all_categories, default=[])
+
+sel_cats = st.sidebar.multiselect(
+    "Suç kategorileri",
+    options=all_categories,
+    default=[]
+)
+
+# PATCH 8: GEOID seçiminde performans koruması
+MAX_GEOIDS_IN_WIDGET = 5000
+geo_options = all_geoids if len(all_geoids) <= MAX_GEOIDS_IN_WIDGET else all_geoids[:MAX_GEOIDS_IN_WIDGET]
+
 sel_geoids = st.sidebar.multiselect(
     "GEOID seçimi",
-    options=all_geoids[:5000],
+    options=geo_options,
     default=[],
-    help="Arama kutusunu kullanarak GEOID filtreleyin"
+    help=f"Arama kutusuyla filtreleyin. Listede ilk {MAX_GEOIDS_IN_WIDGET} gösteriliyor."
 )
 
 # --- Güvenli min/max datetime ---
 dt_series = pd.to_datetime(df_events["datetime"], errors="coerce")
 min_dt_raw = dt_series.min()
 max_dt_raw = dt_series.max()
+
+if pd.isna(min_dt_raw) or pd.isna(max_dt_raw):
+    min_dt_raw = pd.Timestamp.utcnow().normalize()
+    max_dt_raw = min_dt_raw
 
 # Eğer veri NaT ise bugünün tarihi ile güvenli fallback oluştur
 today_date = datetime.utcnow().date()
@@ -733,6 +782,8 @@ if profile.empty:
 
 # Forecast
 fc = forecast_next_hours(profile, start_dt=fc_start, horizon_h=int(horizon))
+if "hour" not in fc.columns:
+    fc["hour"] = pd.to_datetime(fc["ts"]).dt.hour if "ts" in fc.columns else 0
 
 # ---------- Nowcast ile harmanlama ----------
 if use_nowcast and not df_nowcast.empty:
@@ -765,6 +816,9 @@ if use_nowcast and not df_nowcast.empty:
         fc["prob_adj"] = fc["prob"]
 else:
     fc["prob_adj"] = fc["prob"]
+
+if "prob_adj" not in fc.columns:
+    fc["prob_adj"] = fc.get("prob", 0.0)
 
 # Top-3 özet (ayarlı olasılık ile)
 geoids_in_scope = sel_geoids if sel_geoids else all_geoids
@@ -858,7 +912,7 @@ if sel_geo_for_plot:
             tooltip=[alt.Tooltip("category", title="Kategori"),
                      alt.Tooltip("hour", title="Saat"),
                      alt.Tooltip("prob", title="Olasılık", format=".3f")],
-            color=alt.Color("prob:Q", title="Olasılık", scale=alt.Scale(scheme="orangered"))
+            color=alt.Color("prob:Q", title="Olasılık", scale=alt.Scale(scheme="oranges"))
         ).properties(height=320)
         st.altair_chart(heat, use_container_width=True)
 
