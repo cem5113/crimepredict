@@ -17,7 +17,7 @@ def _now_sf_fallback() -> datetime:
         return now_sf()
     except Exception:
         try:
-            from utils.constants import SF_TZ_OFFSET
+            from components.utils.constants import SF_TZ_OFFSET
             return datetime.utcnow() + timedelta(hours=SF_TZ_OFFSET)
         except Exception:
             return datetime.utcnow()
