@@ -183,6 +183,9 @@ def read_parquet_from_nested_artifact(
     inner_path_in_zip: str,        # örn. 'fr_crime_10.parquet'
     artifact_name: str | None = None
 ) -> pd.DataFrame:
+    # EKLE ► ZIP bytes'ı indir
+    zip_bytes = fetch_latest_artifact_zip(owner, repo, artifact_name)
+
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as outer:
         members = outer.namelist()
         cand = [n for n in members if n.endswith("/"+inner_zip_name) or n.endswith(inner_zip_name)]
@@ -422,28 +425,54 @@ def summarize_top3(fc: pd.DataFrame, geoid_list: List[str]) -> pd.DataFrame:
 
 # ---------- Harita zenginleştirme ----------
 COLOR_MAP = {
-    "çok düşük": [200,200,200],
-    "düşük":     [56,168,0],
-    "orta":      [255,221,0],
-    "yüksek":    [255,140,0],
-    "çok yüksek":[204,0,0],
+    "çok düşük": [200, 200, 200],
+    "düşük":     [56, 168, 0],
+    "orta":      [255, 221, 0],
+    "yüksek":    [255, 140, 0],
+    "çok yüksek":[204, 0, 0],
 }
+
+# Görsel gösterimler için düzgün etiket
+_LEVEL_LABELS = {
+    "çok düşük": "Çok Düşük",
+    "düşük":     "Düşük",
+    "orta":      "Orta",
+    "yüksek":    "Yüksek",
+    "çok yüksek":"Çok Yüksek",
+}
+def pretty_level(lvl: str) -> str:
+    return _LEVEL_LABELS.get(str(lvl).lower().strip(), str(lvl).capitalize())
 
 def only_digits(s: str) -> str:
     return ''.join(ch for ch in str(s) if ch.isdigit())
 
-def inject_properties_top3(geojson_dict: dict, top3_df: pd.DataFrame, risk_daily_df: pd.DataFrame | None = None) -> dict:
+def inject_properties_top3(
+    geojson_dict: dict,
+    top3_df: pd.DataFrame,
+    risk_daily_df: pd.DataFrame | None = None
+) -> dict:
     if not geojson_dict:
         return geojson_dict
+
     feats = geojson_dict.get("features", [])
-    tmap = {g: sub.sort_values("rank").reset_index(drop=True) for g, sub in top3_df.groupby("geoid")}
+    tmap = {g: sub.sort_values("rank").reset_index(drop=True)
+            for g, sub in top3_df.groupby("geoid")} if isinstance(top3_df, pd.DataFrame) and not top3_df.empty else {}
+
+    # --- risk quantile hazırlığı (güvenli) ---
     rmap, q25, q50, q75 = None, None, None, None
-    if risk_daily_df is not None and not risk_daily_df.empty:
-        rmap = risk_daily_df.set_index("geoid")["risk_score_daily"].to_dict()
-        q25, q50, q75 = risk_daily_df["risk_score_daily"].quantile([0.25,0.5,0.75]).tolist()
+    if isinstance(risk_daily_df, pd.DataFrame) and not risk_daily_df.empty and "risk_score_daily" in risk_daily_df.columns:
+        _scores = pd.to_numeric(risk_daily_df["risk_score_daily"], errors="coerce").dropna()
+        if not _scores.empty:
+            rmap = risk_daily_df.set_index("geoid")["risk_score_daily"].to_dict()
+            try:
+                q25, q50, q75 = _scores.quantile([0.25, 0.5, 0.75]).tolist()
+            except Exception:
+                q25 = q50 = q75 = None
 
     def level_of(v: float) -> str:
-        if q25 is None: return "orta"
+        # Küçük harf döndür — COLOR_MAP ile birebir uyumlu
+        if q25 is None or pd.isna(q25) or pd.isna(q50) or pd.isna(q75):
+            return "orta"
         if v <= q25: return "düşük"
         if v <= q50: return "orta"
         if v <= q75: return "yüksek"
@@ -452,30 +481,42 @@ def inject_properties_top3(geojson_dict: dict, top3_df: pd.DataFrame, risk_daily
     out = []
     for feat in feats:
         props = (feat.get("properties") or {}).copy()
-        raw = next((props[k] for k in ("geoid","GEOID","cell_id","id") if k in props), None)
+        raw = next((props[k] for k in ("geoid", "GEOID", "cell_id", "id") if k in props), None)
         geoid = ''.join(ch for ch in str(raw or "") if str(ch).isdigit())[:11]
         props.setdefault("display_id", str(raw or ""))
 
+        # Risk seviyesi + renk
         if rmap is not None and geoid in rmap:
-            val = float(rmap[geoid])
-            props["risk_score_daily"] = val
-            lvl = level_of(val)
+            try:
+                val = float(rmap[geoid])
+            except Exception:
+                val = np.nan
+            if not np.isnan(val):
+                props["risk_score_daily"] = val
+                lvl = level_of(val)
+            else:
+                lvl = "orta"
         else:
             lvl = "orta"
-        props["fill_color"] = COLOR_MAP.get(lvl, [220,220,220])
 
+        props["risk_level"] = lvl                              # makine dostu, küçük harf
+        props["risk_level_label"] = pretty_level(lvl)          # ekranda gösterilecek biçim
+        props["fill_color"] = COLOR_MAP.get(lvl, [220, 220, 220])
+
+        # Top-3 tooltip içeriği
         if geoid in tmap:
             sub = tmap[geoid]
             lines = []
             for _, rr in sub.iterrows():
-                pct = f"{rr['share']*100:.1f}%"
-                ph = rr.get("peak_hours","—")
+                pct = f"{(rr['share'] * 100):.1f}%"
+                ph  = rr.get("peak_hours", "—")
                 lines.append(f"{rr['rank']}. {rr['category']} • {pct} • {ph}")
             props["top3_html"] = "<br/>".join(lines)
         else:
             props["top3_html"] = "Veri yok"
 
         out.append({**feat, "properties": props})
+
     return {**geojson_dict, "features": out}
 
 # ---------- UI: Yan panel ----------
@@ -573,6 +614,7 @@ stacking_metrics = {}
 
 try:
     if sf_members:
+        # 1) Nowcast (parquet) dosyasını bul ve oku
         pred_name = _find_first_by_patterns(
             sf_members,
             patterns=[
@@ -581,49 +623,58 @@ try:
                 r"(?:^|/)risk_hourly\.parquet$"
             ]
         )
+
         if pred_name:
             with zipfile.ZipFile(io.BytesIO(fetch_latest_artifact_zip(OWNER_MAIN, REPO_MAIN, ARTIFACT_RISK))) as zf:
                 with zf.open(pred_name) as f:
                     df_nowcast = pd.read_parquet(f)
+
+            # kolon isimlerini normalize et
             df_nowcast.columns = [str(c).strip().lower() for c in df_nowcast.columns]
+
+            # GEOID türet
             if "geoid" not in df_nowcast.columns:
-                for alt in ("cell_id","geoid10","geoid_10","id"):
+                for alt in ("cell_id", "geoid10", "geoid_10", "id"):
                     if alt in df_nowcast.columns:
                         df_nowcast["geoid"] = df_nowcast[alt]
                         break
             if "geoid" not in df_nowcast.columns:
                 df_nowcast["geoid"] = ""
+
             # zaman alanları
             if "datetime" in df_nowcast.columns:
                 df_nowcast["datetime"] = pd.to_datetime(df_nowcast["datetime"], errors="coerce")
                 df_nowcast["hour"] = df_nowcast["datetime"].dt.hour
             elif "date" in df_nowcast.columns and "hour" in df_nowcast.columns:
-                df_nowcast["datetime"] = pd.to_datetime(df_nowcast["date"].astype(str)) + pd.to_timedelta(df_nowcast["hour"].astype(int), unit="h")
+                df_nowcast["datetime"] = (
+                    pd.to_datetime(df_nowcast["date"].astype(str), errors="coerce")
+                    + pd.to_timedelta(df_nowcast["hour"].astype(int), unit="h")
+                )
                 df_nowcast["hour"] = df_nowcast["hour"].astype(int)
             elif "hour" in df_nowcast.columns:
                 df_nowcast["hour"] = df_nowcast["hour"].astype(int)
+
             # skor sütunu
             score_col = None
-            for c in ("score","risk_score","prob","p","y_pred","prediction","stacking_prob"):
+            for c in ("score", "risk_score", "prob", "p", "y_pred", "prediction", "stacking_prob"):
                 if c in df_nowcast.columns:
-                    score_col = c; break
+                    score_col = c
+                    break
             if score_col is None:
                 numeric_cols = [c for c in df_nowcast.columns if pd.api.types.is_numeric_dtype(df_nowcast[c])]
-                score_col = numeric_cols[0] if numeric_cols else None
+                score_col = numeric_cols[0] if numeric_cols else None  # None olabilir, harman aşamasında kontrol ediliyor
+                
+            if pred_name and score_col is None:
+                st.info("Nowcast dosyasında skor kolonu bulunamadı; forecast tek başına kullanılacak.")
+    
+            # GEOID normalize et ve tamamen geçersizse kapat
             df_nowcast["geoid"] = df_nowcast["geoid"].map(normalize_geoid)
+            df_nowcast = df_nowcast[df_nowcast["geoid"] != "00000000000"]
             _invalid_all = df_nowcast["geoid"].isna().all() or (df_nowcast["geoid"] == "00000000000").all()
             if _invalid_all:
-                df_nowcast = pd.DataFrame()  # böylece aşağıda use_nowcast koşulu ile harman yapılmaz
-            
-            # metrikler
-            metrics_name = _find_first_by_patterns(
-                sf_members,
-                patterns=[
-                    r"(?:^|/)(stacking|model).*metrics.*\.json$",
-                    r"(?:^|/)metrics.*\.json$"
-                ]
-            )
-        # metrikler
+                df_nowcast = pd.DataFrame()  # böylece aşağıda use_nowcast koşulu çalışmaz
+
+        # 2) Metrikleri (JSON) tek sefer arayıp oku
         metrics_name = _find_first_by_patterns(
             sf_members,
             patterns=[
@@ -633,6 +684,7 @@ try:
         )
         if metrics_name:
             stacking_metrics = read_json_from_artifact(OWNER_MAIN, REPO_MAIN, metrics_name, ARTIFACT_RISK)
+
 except Exception:
     df_nowcast = pd.DataFrame()
     stacking_metrics = {}
