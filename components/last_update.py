@@ -147,18 +147,6 @@ def show_last_update_badge(
                     # Eski sürüm desteği
                     st.experimental_rerun()
 
-        # Pipeline tetikleyici
-        with c2:
-            if st.button("⚙️ Full pipeline", help="Tam ETL/ML hattını tetikle"):
-                if callable(on_pipeline_click):
-                    try:
-                        on_pipeline_click()
-                        st.success("Pipeline tetikleme isteği gönderildi.")
-                    except Exception as e:
-                        st.warning(f"Pipeline tetiklenemedi: {e}")
-                else:
-                    st.info("Pipeline tetik isteği (mock).")
-
         # Son reload bilgisi
         with c3:
             st.caption(f"Son yeniden yükleme (SF): {st.session_state.get('last_reload_at_sf', '-')}")
