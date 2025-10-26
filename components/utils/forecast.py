@@ -1,230 +1,261 @@
-# components/utils/forecast.py
+# utils/forecast.py
 from __future__ import annotations
-from typing import Optional, Dict, List
 import math
+from datetime import datetime, timedelta
+from typing import Optional, Dict, Any, Iterable
 
 import numpy as np
 import pandas as pd
 
-# Paket içi sabitler (göreli import)
-try:
-    from .constants import KEY_COL as DEFAULT_KEY_COL
-except Exception:
-    DEFAULT_KEY_COL = "geoid"
+from utils.constants import CRIME_TYPES, KEY_COL, CATEGORY_TO_KEYS, SF_TZ_OFFSET
 
-__all__ = [
-    "_normalize_events",
-    "prob_ge_k",
-    "poisson_q",
-    "pois_pi90",
-    "precompute_base_intensity",
-    "aggregate_fast",
-]
+# ---- küçük yardımcılar ----
+def _haversine_m(lat1, lon1, lat2, lon2) -> float:
+    R = 6371000.0
+    dlat = np.radians(lat2 - lat1)
+    dlon = np.radians(lon2 - lon1)
+    a = (np.sin(dlat/2)**2 +
+         np.cos(np.radians(lat1))*np.cos(np.radians(lat2))*np.sin(dlon/2)**2)
+    return 2 * R * np.arcsin(np.sqrt(a))
 
+# -------------------- Baz yoğunluk: normalize --------------------
+def precompute_base_intensity(geo_df: pd.DataFrame) -> np.ndarray:
+    lon = pd.to_numeric(geo_df["centroid_lon"], errors="coerce").to_numpy()
+    lat = pd.to_numeric(geo_df["centroid_lat"], errors="coerce").to_numpy()
 
-# ---------------------------------------------------------------------
-# Yardımcılar
-# ---------------------------------------------------------------------
-def _normalize_events(
-    events: Optional[pd.DataFrame],
-    lat_col: str = "latitude",
-    lon_col: str = "longitude",
-    ts_col: str = "timestamp",
-    type_col: str = "type",
-) -> pd.DataFrame:
-    """events DF'ini ts/lat/lon isimlerine normalize eder, UTC ts üretir."""
-    if events is None or not isinstance(events, pd.DataFrame) or events.empty:
-        return pd.DataFrame(columns=[ts_col, lat_col, lon_col, type_col])
+    # 2 sentetik tepe + küçük zemin (veri yoksa fallback yüzeyi)
+    peak1 = np.exp(-(((lon + 122.41) ** 2) / 0.0008 + ((lat - 37.78) ** 2) / 0.0005))
+    peak2 = np.exp(-(((lon + 122.42) ** 2) / 0.0006 + ((lat - 37.76) ** 2) / 0.0006))
+    raw = 0.2 + 0.8 * (peak1 + peak2) + 0.07
 
-    ev = events.copy()
-    lower = {str(c).lower(): c for c in ev.columns}
+    raw = raw - np.nanmin(raw)
+    denom = np.nanmax(raw) + 1e-9
+    return (raw / denom).astype(float)
 
-    # ts
-    if ts_col not in ev.columns:
-        for cand in ["ts", "timestamp", "datetime", "occurred_at", "reported_at", "date_time", "time", "date"]:
-            if cand in lower:
-                ev[ts_col] = pd.to_datetime(ev[lower[cand]], utc=True, errors="coerce")
-                break
-        else:
-            ev[ts_col] = pd.NaT
-    else:
-        ev[ts_col] = pd.to_datetime(ev[ts_col], utc=True, errors="coerce")
+# -------------------- Near-Repeat (NR) skor vektörü --------------------
+def _near_repeat_score(
+    geo_df: pd.DataFrame,
+    events: pd.DataFrame,
+    start_iso: str,
+    *,
+    lookback_h: int = 24,
+    spatial_radius_m: int = 400,
+    temporal_decay_h: float = 12.0,
+) -> np.ndarray:
+    if events is None or len(events) == 0:
+        return np.zeros(len(geo_df), dtype=float)
 
-    # lat/lon
-    if lat_col not in ev.columns:
-        if "lat" in lower:
-            ev = ev.rename(columns={lower["lat"]: lat_col})
-        elif "latitude" in lower:
-            ev = ev.rename(columns={lower["latitude"]: lat_col})
-    if lon_col not in ev.columns:
-        if "lon" in lower:
-            ev = ev.rename(columns={lower["lon"]: lon_col})
-        elif "longitude" in lower:
-            ev = ev.rename(columns={lower["longitude"]: lon_col})
+    # kolon adlarını esnek yakala
+    cols = {c.lower(): c for c in events.columns}
+    lat_col = cols.get("lat") or cols.get("latitude")
+    lon_col = cols.get("lon") or cols.get("longitude")
+    ts_col  = cols.get("ts")  or cols.get("timestamp")
+    if not (lat_col and lon_col and ts_col):
+        return np.zeros(len(geo_df), dtype=float)
 
-    # type opsiyonel
-    if type_col not in ev.columns:
-        ev[type_col] = None
+    ev = events[[ts_col, lat_col, lon_col]].copy()
+    ev[ts_col]  = pd.to_datetime(ev[ts_col], utc=True, errors="coerce")
+    ev[lat_col] = pd.to_numeric(ev[lat_col], errors="coerce")
+    ev[lon_col] = pd.to_numeric(ev[lon_col], errors="coerce")
+    ev = ev.dropna()
 
-    ev = ev.dropna(subset=[ts_col, lat_col, lon_col])
-    return ev
+    start = datetime.fromisoformat(start_iso)
+    t0 = start - timedelta(hours=int(lookback_h))
+    ev = ev[(ev[ts_col] >= t0) & (ev[ts_col] <= start)]
+    if ev.empty:
+        return np.zeros(len(geo_df), dtype=float)
 
+    cent_lat = pd.to_numeric(geo_df["centroid_lat"], errors="coerce").to_numpy()
+    cent_lon = pd.to_numeric(geo_df["centroid_lon"], errors="coerce").to_numpy()
 
-def prob_ge_k(lmbd: float, k: int) -> float:
+    nr = np.zeros(len(geo_df), dtype=float)
+    tau = max(float(temporal_decay_h), 1e-6)
+
+    for _, r in ev.iterrows():
+        d = _haversine_m(cent_lat, cent_lon, float(r[lat_col]), float(r[lon_col]))
+        w_space = np.exp(-np.maximum(d, 0.0) / float(spatial_radius_m))
+        dt_h = (start - r[ts_col].to_pydatetime()).total_seconds() / 3600.0
+        w_time = np.exp(-max(dt_h, 0.0) / tau)
+        nr += w_space * w_time
+
+    nr = nr - nr.min()
+    maxv = nr.max()
+    return (nr / maxv) if maxv > 1e-9 else np.zeros_like(nr)
+
+# -------------------- Events'ten (24,7) zaman ağırlıkları --------------------
+def _build_time_weights_from_events(events: pd.DataFrame | None) -> tuple[np.ndarray, np.ndarray]:
     """
-    Poisson P(X >= k).
-    k=1 için kapalı form kullanır; k>=2 için e^-λ λ^i / i! serisini güvenli toplar.
+    events -> (hour_of_day weights [24], day_of_week weights [7]).
+    UTC ts'leri SF yereline çevirir. Veri yoksa makul fallback döner.
     """
-    l = float(max(lmbd, 0.0))
-    if k <= 1:
-        return 1.0 - math.exp(-l)
-    term = math.exp(-l)  # i=0
-    cdf = term
-    for i in range(1, k):
-        term *= l / i
-        cdf += term
-    return float(max(0.0, 1.0 - cdf))
+    # Fallback: sinüs bazlı 24 saat profili ve hafif hafta etkisi
+    h = np.arange(24, dtype=float)
+    diurnal24 = 1.0 + 0.4 * np.sin(((h - 18) / 24.0) * 2.0 * np.pi)
+    diurnal24 = np.clip(diurnal24, 1e-6, None)
+    diurnal24 = diurnal24 / diurnal24.sum()
 
+    weekly7 = np.array([0.95, 1.00, 1.00, 1.00, 1.05, 1.10, 1.10], dtype=float)
+    weekly7 = weekly7 / weekly7.sum()
 
-# --------- Poisson kantil yardımcıları (SciPy gerektirmez) ---------
-def poisson_q(lmbd: float, q: float = 0.9, k_max: int | None = None) -> int:
-    """
-    Poisson(lmbd) için q-kantili (en küçük k: P(X<=k) >= q).
-    SciPy olmadan stabil hesap (yinelemeli terim güncelleme).
-    """
-    l = float(max(lmbd, 0.0))
-    if l == 0.0:
-        return 0
-    if k_max is None:
-        # güvenli üst sınır
-        k_max = int(l + 10.0 * math.sqrt(l) + 10)
+    if not isinstance(events, pd.DataFrame) or events.empty:
+        return diurnal24, weekly7
 
-    term = math.exp(-l)  # k=0
-    cdf = term
-    k = 0
-    while cdf < q and k < k_max:
-        k += 1
-        term *= l / k
-        cdf += term
-    return k
+    cols = {c.lower(): c for c in events.columns}
+    ts_col = cols.get("ts") or cols.get("timestamp")
+    if not ts_col:
+        return diurnal24, weekly7
 
+    tmp = events[[ts_col]].copy()
+    tmp[ts_col] = pd.to_datetime(tmp[ts_col], utc=True, errors="coerce")
+    tmp = tmp.dropna()
+    if tmp.empty:
+        return diurnal24, weekly7
 
-def pois_pi90(lmbd: float) -> int:
-    """Poisson için %90 üst eşik (90. yüzdelik)."""
-    return poisson_q(lmbd, q=0.90)
+    # UTC → SF
+    tmp["ts_sf"] = tmp[ts_col] + pd.Timedelta(hours=SF_TZ_OFFSET)
 
+    # Saat (0..23)
+    hours_cnt = tmp["ts_sf"].dt.hour.value_counts().reindex(range(24), fill_value=0).astype(float)
+    if hours_cnt.sum() > 0:
+        diurnal24 = (hours_cnt / hours_cnt.sum()).to_numpy()
 
-# ---------------------------------------------------------------------
-# 1) Taban yoğunluğu (baseline λ) — geoid başına sabit ağırlık
-# ---------------------------------------------------------------------
-def precompute_base_intensity(geo_df: pd.DataFrame, key_col: Optional[str] = None) -> pd.DataFrame:
-    """
-    GEO hücreleri için uniform bir temel yoğunluk üretir.
-    Gerçek hayatta geçmiş oranlardan gelir; burada güvenli bir başlangıç sunuyor.
-    Dönüş: [key_col, base_lambda]
-    """
-    kcol = key_col or DEFAULT_KEY_COL
-    if geo_df is None or geo_df.empty or kcol not in geo_df.columns:
-        return pd.DataFrame(columns=[kcol, "base_lambda"])
+    # Gün (Mon=0..Sun=6)
+    dow_cnt = tmp["ts_sf"].dt.dayofweek.value_counts().reindex(range(7), fill_value=0).astype(float)
+    if dow_cnt.sum() > 0:
+        weekly7 = (dow_cnt / dow_cnt.sum()).to_numpy()
 
-    n = len(geo_df)
-    # Çok küçük de olsa >0 tut (Poisson hesapları için)
-    base = np.full(n, 0.05, dtype=float)
-    out = geo_df[[kcol]].copy()
-    out["base_lambda"] = base
-    return out
+    return diurnal24, weekly7
 
-
-# ---------------------------------------------------------------------
-# 2) Hızlı toplulaştırma ve tahmin (NR-lite + kategori filtresi)
-# ---------------------------------------------------------------------
+# -------------------- Hızlı agregasyon (NR + filtre + 5'li tier) --------------------
 def aggregate_fast(
     start_iso: str,
     horizon_h: int,
     geo_df: pd.DataFrame,
-    base_int: pd.DataFrame,
+    base_int: np.ndarray,
     *,
-    events: Optional[pd.DataFrame] = None,
+    k_lambda: float = 0.12,
+    events: pd.DataFrame | None = None,
     near_repeat_alpha: float = 0.35,
     nr_lookback_h: int = 24,
-    nr_radius_m: float = 400.0,  # şu an kullanılmıyor; ileride mekânsal NR için
+    nr_radius_m: int = 400,
     nr_decay_h: float = 12.0,
-    filters: Optional[Dict[str, List[str]]] = None,
-    key_col: Optional[str] = None,
+    filters: Optional[Dict[str, Any]] = None,
 ) -> pd.DataFrame:
     """
-    Uygulamanın beklediği ana tabloyu üretir.
-    Çıktı kolonları:
-      - [key_col], expected (λ), tier ("Yüksek"/"Orta"/"Hafif"), nr_boost (ops.), hour/dow
+    Not: Toplam beklenenin ufukla (H) doğru orantılı artması için saat ağırlıkları
+    önce 1'e normalize edilir, sonra H ile ÇARPILIR.
     """
-    kcol = key_col or DEFAULT_KEY_COL
-    assert kcol in geo_df.columns, f"{kcol} sütunu geo_df'te yok."
+    # --- 1) Zaman ağırlıkları (sadece diurnal) ---
+    start = datetime.fromisoformat(start_iso)
+    H = max(int(horizon_h), 1)
+    hours = np.arange(H)
+    # gün içi dalga (tepe ≈ 18:00)
+    diurnal = 1.0 + 0.4 * np.sin((((start.hour + hours) % 24 - 18) / 24.0) * 2.0 * np.pi)
+    # normalize et, sonra H ile ölçekle → toplam ağırlık = H
+    w = diurnal / (diurnal.sum() + 1e-12)
+    w = H * w  # <<< kritik: ufuk çarpanı
 
-    # Başlangıç zamanı/ufuk
-    try:
-        start_ts = pd.to_datetime(start_iso, utc=True)
-    except Exception:
-        start_ts = pd.Timestamp.utcnow().floor("h")
-    horizon_h = int(max(1, horizon_h))
+    # --- 2) Near-repeat skoru ---
+    nr = _near_repeat_score(
+        geo_df,
+        events,
+        start_iso,
+        lookback_h=nr_lookback_h,
+        spatial_radius_m=nr_radius_m,
+        temporal_decay_h=nr_decay_h,
+    )
 
-    # 2.1 Tabana katıl
-    df = geo_df[[kcol]].merge(base_int[[kcol, "base_lambda"]], on=kcol, how="left")
-    df["lambda_base"] = df["base_lambda"].fillna(0.05).astype(float)
+    # --- 3) Saatlik lambda ve kırpma ---
+    base_per_hour = k_lambda * base_int  # hücre başına saatlik baz oran
+    lam_hour = base_per_hour[:, None] * w[None, :]
+    lam_hour *= (1.0 + near_repeat_alpha * nr[:, None])  # NR etkisi
+    lam_hour = np.clip(lam_hour, 0.0, 0.9)
 
-    # 2.2 Near-repeat (çok hafif, sadece sayısal boost) — olaylardan ısı üret
-    if events is not None and isinstance(events, pd.DataFrame) and not events.empty:
-        ev = _normalize_events(events)
-        # lookback penceresi
-        ev = ev[(ev["timestamp"] >= (start_ts - pd.Timedelta(hours=nr_lookback_h))) & (ev["timestamp"] < start_ts)]
-        # kategori filtresi (filters={"cats":[...]})
-        if filters and filters.get("cats"):
-            cats = set([str(c).lower() for c in filters["cats"]])
-            if "type" in ev.columns:
-                ev = ev[ev["type"].astype(str).str.lower().isin(cats)]
+    # --- 4) Özetler ---
+    expected = lam_hour.sum(axis=1)  # ufuk toplamı
+    p_hour = 1.0 - np.exp(-lam_hour)
+    q10 = np.quantile(p_hour, 0.10, axis=1)
+    q90 = np.quantile(p_hour, 0.90, axis=1)
 
-        # GEOID eşlemesi varsa (ör: events içinde geoid/KEY_COL kolonu)
-        if kcol in ev.columns:
-            counts = ev.groupby(kcol).size().reindex(df[kcol], fill_value=0).to_numpy(dtype=float)
-        else:
-            # GEOID yoksa çok kaba fallback: tüm hücrelere aynı küçük artış
-            counts = np.full(len(df), float(len(ev)) / max(len(df), 1), dtype=float)
-
-        # zaman sönümüyle normalize edilmiş minik bir güçlendirme
-        decay = math.exp(-nr_lookback_h / max(nr_decay_h, 1e-6))
-        boost = near_repeat_alpha * counts * (1.0 - decay)
-        df["nr_boost"] = boost
+    # --- 5) Tür dağılımı ---
+    rng = np.random.default_rng(42)
+    if CRIME_TYPES and len(CRIME_TYPES) >= 1:
+        alpha = np.full(len(CRIME_TYPES), 1.2)
+        W = rng.dirichlet(alpha, size=len(geo_df))
+        type_cols = {t: expected * W[:, i] for i, t in enumerate(CRIME_TYPES)}
     else:
-        df["nr_boost"] = 0.0
+        alpha = np.array([1.5, 1.2, 2.0, 1.0, 1.3])
+        W = rng.dirichlet(alpha, size=len(geo_df))
+        base_types = ["assault", "burglary", "theft", "robbery", "vandalism"]
+        type_cols = {t: expected * W[:, i] for i, t in enumerate(base_types)}
 
-    # 2.3 Beklenen olay sayısı (λ)
-    df["expected"] = (df["lambda_base"] + df["nr_boost"]).clip(lower=0.0)
+    out = pd.DataFrame({
+        KEY_COL: geo_df[KEY_COL].astype(str).to_numpy(),
+        "expected": expected.astype(float),
+        "q10": q10.astype(float),
+        "q90": q90.astype(float),
+        "nr_boost": nr.astype(float),
+        **type_cols,
+    })
 
-    # 2.4 Tier (Yüksek/Orta/Hafif) — basit quantile eşiği
-    if df["expected"].max() > 0:
-        q66 = df["expected"].quantile(0.66)
-        q33 = df["expected"].quantile(0.33)
+    # --- 6) Kategori filtresi istenmişse expected'i yeniden hesapla ---
+    if filters:
+        cats: Optional[Iterable[str]] = filters.get("cats")
+        if cats:
+            wanted_keys: list[str] = []
+            for c in cats:
+                wanted_keys += CATEGORY_TO_KEYS.get(c, [])
+            wanted_cols = [c for c in wanted_keys if c in out.columns]
+            if wanted_cols:
+                out["expected"] = out[wanted_cols].sum(axis=1)
+
+    # --- 7) 5 kademeli tier ---
+    if out["expected"].gt(0).any():
+        q95 = float(out["expected"].quantile(0.95))
+        q75 = float(out["expected"].quantile(0.75))
+        q50 = float(out["expected"].quantile(0.50))
+        q25 = float(out["expected"].quantile(0.25))
     else:
-        q66 = q33 = 0.0
+        q95 = q75 = q50 = q25 = 0.0
 
-    def _tier(x: float) -> str:
-        if x >= q66 and x > 0:
-            return "Yüksek"
-        if x >= q33 and x > 0:
-            return "Orta"
-        return "Hafif"
+    out["tier"] = np.select(
+        [
+            out["expected"] >= q95,
+            out["expected"] >= q75,
+            out["expected"] >= q50,
+            out["expected"] >= q25,
+        ],
+        ["Çok Yüksek", "Yüksek", "Orta", "Düşük"],
+        default="Çok Düşük",
+    )
 
-    df["tier"] = [_tier(v) for v in df["expected"].to_numpy()]
+    return out
 
-    # 2.5 Heatmap için hour/dow sahte alanları (başlangıç saatinden)
-    df["hour"] = start_ts.hour
-    df["dow"] = start_ts.day_name()[:3]
+# -------------------- Poisson yardımcıları --------------------
+def p_to_lambda_array(p: np.ndarray) -> np.ndarray:
+    p = np.clip(p, 0.0, 0.999999)
+    return -np.log1p(-p)
 
-    # Görsel/tooltip dostu sıralama
-    df = df.sort_values("expected", ascending=False).reset_index(drop=True)
+def p_to_lambda(p):
+    p = np.clip(np.asarray(p, dtype=float), 0.0, 0.999999)
+    return -np.log(1.0 - p)
 
-    # Temiz kolon seti
-    keep = [kcol, "expected", "tier", "nr_boost", "hour", "dow"]
-    for c in ["neighborhood", "centroid_lat", "centroid_lon"]:
-        if c in geo_df.columns and c not in keep:
-            keep.append(c)
-    return df[keep]
+def pois_cdf(k: int, lam: float) -> float:
+    s = 0.0
+    for i in range(k + 1):
+        s += (lam ** i) / math.factorial(i)
+    return math.exp(-lam) * s
+
+def prob_ge_k(lam: float, k: int) -> float:
+    return 1.0 - pois_cdf(k - 1, lam)
+
+def pois_quantile(lam: float, q: float) -> int:
+    k = 0
+    while pois_cdf(k, lam) < q and k < 10_000:
+        k += 1
+    return k
+
+def pois_pi90(lam: float) -> tuple[int, int]:
+    lo = pois_quantile(lam, 0.05)
+    hi = pois_quantile(lam, 0.95)
+    return lo, hi
