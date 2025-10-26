@@ -11,7 +11,7 @@ import streamlit as st
 from streamlit_folium import st_folium
 
 # ── constants
-from utils.constants import SF_TZ_OFFSET, KEY_COL, MODEL_VERSION, MODEL_LAST_TRAIN, CATEGORIES
+from components.utils.constants import SF_TZ_OFFSET, KEY_COL, MODEL_VERSION, MODEL_LAST_TRAIN, CATEGORIES
 
 # ── local path
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
