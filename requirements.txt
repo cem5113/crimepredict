@@ -1,7 +1,10 @@
 streamlit==1.38.0
 pandas==2.2.3
-pydeck==0.9.1
-requests==2.32.3
-pyarrow==17.0.0
+numpy==1.26.4          # xgboost/scikit-learn ile stabil
+xgboost==2.1.1         # tahmin modeli
+scikit-learn==1.5.2    # train/test split, ROC-AUC
+pyarrow==17.0.0        # parquet okuma
+requests==2.32.3       # artifact ZIP indirme
+pydeck==0.9.1          # harita (alternatif olarak folium da var)
 folium==0.17.0
 streamlit-folium==0.20.0
