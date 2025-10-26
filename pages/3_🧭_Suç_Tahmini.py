@@ -1,14 +1,14 @@
 # pages/3_🧭_Suç_Tahmini.py
 from __future__ import annotations
-
-# --- bootstrap: pages/ içinden kök modülleri görebilmek için ---
 import sys, pathlib
+
+# --- bootstrap ---
 HERE = pathlib.Path(__file__).resolve()
-ROOT = HERE.parents[1]  # projenin kökü (pages'in bir üstü)
+ROOT = HERE.parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-# Güvenli constants import'u (fallback'lı)
+# --- güvenli constants import ---
 try:
     from utils.constants import SF_TZ_OFFSET, KEY_COL, MODEL_VERSION, MODEL_LAST_TRAIN, CATEGORIES
 except Exception:
@@ -24,8 +24,8 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 import pydeck as pdk
-from utils.constants import MODEL_VERSION, MODEL_LAST_TRAIN, SF_TZ_OFFSET
 from components.last_update import show_last_update_badge
+
 
 st.set_page_config(page_title="🔮 Suç Tahmini (Stacking Model)", layout="wide")
 st.title("🔮 Suç Tahmini ve Model Performansı")
