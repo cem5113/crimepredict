@@ -926,6 +926,28 @@ summary_top3 = summarize_top3(fc_for_summary, geoid_list=geoids_in_scope)
 col_map, col_tbl = st.columns([2,1])
 with col_map:
     gj = fetch_geojson_smart(GEOJSON_PATH_LOCAL_DEFAULT, GEOJSON_PATH_LOCAL_DEFAULT, RAW_GEOJSON_OWNER, RAW_GEOJSON_REPO)
+
+    # risk_today adaptasyonu (opsiyonel)
+    if isinstance(risk_today, pd.DataFrame) and not risk_today.empty:
+        cols_rt = {c.lower(): c for c in risk_today.columns}
+        if "risk_score_daily" not in cols_rt and "risk_score" in cols_rt:
+            geocol = cols_rt.get("geoid") or cols_rt.get("cell_id") or cols_rt.get("id")
+            if geocol and "date" in cols_rt:
+                rt = risk_today.copy()
+                rt[geocol] = (
+                    rt[geocol].astype(str)
+                    .map(lambda x: ''.join(ch for ch in x if str(ch).isdigit()).zfill(11)[:11])
+                )
+                rt[cols_rt["date"]] = pd.to_datetime(rt[cols_rt["date"]], errors="coerce").dt.date
+                rt = rt.dropna(subset=[cols_rt["date"]])
+                last_day = rt[cols_rt["date"]].max()
+                rt = (rt[rt[cols_rt["date"]] == last_day]
+                      .groupby(geocol, as_index=False)[cols_rt["risk_score"]]
+                      .mean()
+                      .rename(columns={cols_rt["risk_score"]: "risk_score_daily",
+                                       geocol: "geoid"}))
+                risk_today = rt[["geoid", "risk_score_daily"]]
+
     enriched = inject_properties_top3(gj, summary_top3, risk_today if not risk_today.empty else None)
     layer = pdk.Layer(
         "GeoJsonLayer",
