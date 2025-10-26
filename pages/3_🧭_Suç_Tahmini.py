@@ -148,6 +148,38 @@ def recent_events(df: pd.DataFrame, lookback_h: int, category: Optional[str]) ->
     out["weight"] = 1.0
     return out
 
+agg_norm = agg.copy()
+agg_norm.columns = [c.strip() for c in agg_norm.columns]
+
+UI_KEY = KEY_COL  # components.utils.constants içindeki KEY_COL
+alts = [UI_KEY, UI_KEY.upper(), UI_KEY.lower(), "geoid", "GEOID", "id", "geoid_x", "geoid_y"]
+
+if UI_KEY not in agg_norm.columns:
+    for a in alts:
+        if a in agg_norm.columns:
+            agg_norm = agg_norm.rename(columns={a: UI_KEY})
+            break
+
+if UI_KEY not in agg_norm.columns:
+    st.error(f"GEOID/KEY_COL kolonu bulunamadı. Var olan kolonlar: {list(agg_norm.columns)}")
+    st.stop()
+
+# Folium haritasını çağırırken agg yerine agg_norm gönder
+m = build_map_fast(
+    df_agg=agg_norm,
+    geo_features=GEO_FEATURES,
+    geo_df=GEO_DF,
+    show_popups=show_popups,
+    patrol=st.session_state.get("patrol"),
+    show_hotspot=True, perm_hotspot_mode="heat",
+    show_temp_hotspot=True, temp_hotspot_points=temp_points,
+    add_layer_control=False, risk_layer_show=True,
+    perm_hotspot_show=True, temp_hotspot_show=True,
+    risk_layer_name="Tahmin (risk)",
+    perm_hotspot_layer_name="Hotspot (kalıcı)",
+    temp_hotspot_layer_name="Hotspot (geçici)",
+)
+
 def make_temp_hotspot_from_agg(agg: pd.DataFrame, geo_df: pd.DataFrame, topn: int = 80) -> pd.DataFrame:
     if agg is None or agg.empty:
         return pd.DataFrame(columns=["latitude", "longitude", "weight"])
