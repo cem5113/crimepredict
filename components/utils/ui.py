@@ -339,6 +339,45 @@ def render_result_card(df_agg: pd.DataFrame, geoid: str, start_iso: str, horizon
 
 # ───────────────────────────── HARİTA ─────────────────────────────
 def build_map_fast(
+    m = folium.Map(location=[37.7749, -122.4194], zoom_start=12, tiles=None)
+    folium.TileLayer(
+        tiles="CartoDB positron",
+        name="cartodbpositron",
+        control=True,
+        attr='&copy; OpenStreetMap & CARTO',
+    ).add_to(m)
+
+    # Veri yoksa erken dön
+    if df_agg is None or df_agg.empty:
+        st.warning("Boş veri geldi, harita çizilemiyor.")
+        return m
+
+    # --- KEY_COL kolonunu sağlam al ---
+    try:
+        from components.utils.constants import KEY_COL as UI_KEY
+    except Exception:
+        UI_KEY = "geoid"
+
+    df_agg = df_agg.copy()
+    df_agg.columns = [str(c).strip() for c in df_agg.columns]
+
+    if UI_KEY not in df_agg.columns:
+        lower = {c.lower(): c for c in df_agg.columns}
+        # aday isimler
+        for cand in (UI_KEY, UI_KEY.lower(), "geoid", "geoid_x", "geoid_y", "geoid__x", "id", "GEOID"):
+            if cand in df_agg.columns:
+                df_agg = df_agg.rename(columns={cand: UI_KEY})
+                break
+            if cand.lower() in lower:
+                df_agg = df_agg.rename(columns={lower[cand.lower()]: UI_KEY})
+                break
+
+    if UI_KEY not in df_agg.columns:
+        st.error(f"Harita: '{UI_KEY}' kolonu bulunamadı. Kolonlar: {list(df_agg.columns)}")
+        return m
+
+    df_agg[UI_KEY] = df_agg[UI_KEY].astype(str)
+
     df_agg: pd.DataFrame,
     geo_features: list,
     geo_df: pd.DataFrame,
