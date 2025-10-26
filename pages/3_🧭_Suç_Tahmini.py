@@ -35,32 +35,74 @@ st.title("🔮 Suç Tahmini ve Model Performansı")
 # ───────────────────────────────
 OWNER = "cem5113"
 REPO = "crime_prediction_data"
-ARTIFACT_URL = f"https://github.com/{OWNER}/{REPO}/releases/latest/download/fr-crime-outputs-parquet.zip"
+ARTIFACT_NAME = "fr-crime-outputs-parquet"
+EXPECTED_FILES = ["fr_crime_09.csv", "metrics_stacking_ohe.parquet"]
+
+def resolve_github_token() -> str | None:
+    tok = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
+    if tok:
+        return tok
+    try:
+        for k in ("github_token", "GH_TOKEN", "GITHUB_TOKEN"):
+            if k in st.secrets and st.secrets[k]:
+                os.environ["GITHUB_TOKEN"] = str(st.secrets[k])
+                return os.environ["GITHUB_TOKEN"]
+    except Exception:
+        pass
+    return None
 
 @st.cache_data(show_spinner=True)
+@st.cache_data(show_spinner=True)
 def load_artifact_data() -> tuple[pd.DataFrame, pd.DataFrame]:
+    """GitHub Actions artifact'tan fr_crime_09.csv ve metrics_stacking_ohe.parquet indirir."""
+    token = resolve_github_token()
+    if not token:
+        st.error("GitHub Token bulunamadı (GH_TOKEN veya GITHUB_TOKEN).")
+        return pd.DataFrame(), pd.DataFrame()
+
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
     try:
-        resp = requests.get(ARTIFACT_URL, timeout=30)
-        resp.raise_for_status()
-        zf = zipfile.ZipFile(io.BytesIO(resp.content))
-        inner = [f for f in zf.namelist() if f.endswith(".csv") or f.endswith(".parquet")]
-        if not inner:
-            st.error("Zip içinde veri bulunamadı.")
+        # 1️⃣ Son başarılı workflow run’ı bul
+        runs_url = f"https://api.github.com/repos/{OWNER}/{REPO}/actions/runs?per_page=10"
+        runs = requests.get(runs_url, headers=headers, timeout=30).json()
+        run_ids = [r["id"] for r in runs.get("workflow_runs", []) if r.get("conclusion") == "success"]
+        if not run_ids:
+            st.warning("Başarılı workflow run bulunamadı.")
             return pd.DataFrame(), pd.DataFrame()
-        # fr_crime_09.csv’yi bul
-        target_csv = next((f for f in inner if "fr_crime_09" in f.lower()), inner[0])
-        with zf.open(target_csv) as f:
-            df = pd.read_csv(f)
-        # metrik dosyası
-        metrics_file = next((f for f in inner if "metrics_stacking_ohe" in f.lower()), None)
-        if metrics_file:
-            with zf.open(metrics_file) as f2:
-                metrics = pd.read_parquet(f2)
-        else:
-            metrics = pd.DataFrame()
-        return df, metrics
+
+        # 2️⃣ En güncel run’daki artefact’ları listele
+        for rid in run_ids:
+            arts_url = f"https://api.github.com/repos/{OWNER}/{REPO}/actions/runs/{rid}/artifacts"
+            arts = requests.get(arts_url, headers=headers, timeout=30).json().get("artifacts", [])
+            target = next((a for a in arts if a["name"] == ARTIFACT_NAME and not a["expired"]), None)
+            if target:
+                download_url = target["archive_download_url"]
+                zdata = requests.get(download_url, headers=headers, timeout=60).content
+                zf = zipfile.ZipFile(io.BytesIO(zdata))
+
+                # 3️⃣ İçteki ZIP (bazı pipeline’lar nested zip üretir)
+                inner_zip = [n for n in zf.namelist() if n.endswith(".zip")]
+                if inner_zip:
+                    nested = zipfile.ZipFile(io.BytesIO(zf.read(inner_zip[0])))
+                    names = nested.namelist()
+                    csv_name = next((n for n in names if "fr_crime_09" in n.lower()), names[0])
+                    df = pd.read_csv(io.BytesIO(nested.read(csv_name)))
+                    metrics_name = next((n for n in names if "metrics_stacking_ohe" in n.lower()), None)
+                    metrics = pd.read_parquet(io.BytesIO(nested.read(metrics_name))) if metrics_name else pd.DataFrame()
+                    return df, metrics
+                else:
+                    # doğrudan dosyalar zip içinde olabilir
+                    names = zf.namelist()
+                    csv_name = next((n for n in names if "fr_crime_09" in n.lower()), names[0])
+                    df = pd.read_csv(io.BytesIO(zf.read(csv_name)))
+                    metrics_name = next((n for n in names if "metrics_stacking_ohe" in n.lower()), None)
+                    metrics = pd.read_parquet(io.BytesIO(zf.read(metrics_name))) if metrics_name else pd.DataFrame()
+                    return df, metrics
+        st.error("Artifact bulunamadı veya içi boş.")
+        return pd.DataFrame(), pd.DataFrame()
+
     except Exception as e:
-        st.error(f"Veri indirilemedi: {e}")
+        st.error(f"Artifact indirilemedi: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
 df, metrics = load_artifact_data()
