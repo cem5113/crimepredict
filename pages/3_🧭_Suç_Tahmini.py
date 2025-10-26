@@ -409,14 +409,24 @@ if sekme == "Operasyon":
         if agg is not None:
             if engine == "Folium":
                 try:
-                    # --- GEOID kolonunu garantiye al ---
-                    if "geoid" not in df.columns:
-                        possible_keys = [c for c in df.columns if c.lower() in ("geoid", "geoid_x", "geoid_y", "id", "GEOID")]
-                        if possible_keys:
-                            df = df.rename(columns={possible_keys[0]: "geoid"})
-                        else:
-                            st.error("Veride 'geoid' kolonu bulunamadı. Harita çizimi için gerekli.")
-                            st.stop()
+                    # --- GEOID kolonunu ve tahmin sütunlarını garantiye al ---
+                    agg = _ensure_geoid(agg)
+                    if "pred_expected" not in agg.columns and "expected" in agg.columns:
+                        agg = agg.rename(columns={"expected": "pred_expected"})
+
+                    # Harita oluştur
+                    m = build_map_fast(
+                        df_agg=agg, geo_features=GEO_FEATURES, geo_df=GEO_DF,
+                        show_popups=show_popups, patrol=st.session_state.get("patrol"),
+                        show_hotspot=True, perm_hotspot_mode="heat",
+                        show_temp_hotspot=True, temp_hotspot_points=temp_points,
+                        add_layer_control=False, risk_layer_show=True,
+                        perm_hotspot_show=True, temp_hotspot_show=True,
+                        risk_layer_name="Tahmin (risk)",
+                        perm_hotspot_layer_name="Hotspot (kalıcı)",
+                        temp_hotspot_layer_name="Hotspot (geçici)",
+                    )
+
                     m = build_map_fast(
                         df_agg=agg, geo_features=GEO_FEATURES, geo_df=GEO_DF,
                         show_popups=show_popups, patrol=st.session_state.get("patrol"),
