@@ -10,7 +10,7 @@ KEY_COL_ALIASES = ["geoid", "GEOID", "id"]
 
 # Model meta
 MODEL_VERSION    = "v1.0.0"
-MODEL_LAST_TRAIN = "2025-10-04"   # dilersen datetime.utcnow().strftime("%Y-%m-%d")
+MODEL_LAST_TRAIN = "2025-10-26"   # dilersen datetime.utcnow().strftime("%Y-%m-%d")
 
 # UI listeleri
 CATEGORIES = ["Assault", "Burglary", "Robbery", "Theft", "Vandalism", "Vehicle Theft"]
