@@ -460,14 +460,58 @@ def inject_properties_top3(
 
     # --- risk quantile hazırlığı (güvenli) ---
     rmap, q25, q50, q75 = None, None, None, None
-    if isinstance(risk_daily_df, pd.DataFrame) and not risk_daily_df.empty and "risk_score_daily" in risk_daily_df.columns:
-        _scores = pd.to_numeric(risk_daily_df["risk_score_daily"], errors="coerce").dropna()
-        if not _scores.empty:
-            rmap = risk_daily_df.set_index("geoid")["risk_score_daily"].to_dict()
-            try:
-                q25, q50, q75 = _scores.quantile([0.25, 0.5, 0.75]).tolist()
-            except Exception:
-                q25 = q50 = q75 = None
+    if isinstance(risk_daily_df, pd.DataFrame) and not risk_daily_df.empty:
+        df_r = risk_daily_df.copy()
+    
+        # Kolon isimlerini küçük harfe indir
+        cols = {c.lower(): c for c in df_r.columns}
+    
+        # 1) Eğer zaten beklenen format varsa: geoid + risk_score_daily
+        if "geoid" in cols and "risk_score_daily" in cols:
+            df_r[cols["geoid"]] = (
+                df_r[cols["geoid"]]
+                .astype(str)
+                .map(lambda x: ''.join(ch for ch in x if str(ch).isdigit()).zfill(11)[:11])
+            )
+            _scores = pd.to_numeric(df_r[cols["risk_score_daily"]], errors="coerce").dropna()
+            if not _scores.empty:
+                rmap = df_r.set_index(cols["geoid"])[cols["risk_score_daily"]].to_dict()
+                try:
+                    q25, q50, q75 = _scores.quantile([0.25, 0.50, 0.75]).tolist()
+                except Exception:
+                    q25 = q50 = q75 = None
+    
+        # 2) Yeni şema: GEOID, date, hour_range, risk_score, risk_level, risk_decile
+        elif ("geoid" in cols or "cell_id" in cols or "id" in cols) and "date" in cols and "risk_score" in cols:
+            geocol = cols.get("geoid") or cols.get("cell_id") or cols.get("id")
+            # Normalize GEOID
+            df_r[geocol] = (
+                df_r[geocol]
+                .astype(str)
+                .map(lambda x: ''.join(ch for ch in x if str(ch).isdigit()).zfill(11)[:11])
+            )
+            # Tarih
+            df_r[cols["date"]] = pd.to_datetime(df_r[cols["date"]], errors="coerce").dt.date
+            df_r = df_r.dropna(subset=[cols["date"]])
+    
+            # En güncel gün
+            last_day = df_r[cols["date"]].max()
+            today = df_r[df_r[cols["date"]] == last_day]
+    
+            # Günlük ortalama risk (hour_range çoklu satırlar olabilir)
+            by_geoid = (
+                today.groupby(geocol, as_index=False)[cols["risk_score"]]
+                .mean()
+                .rename(columns={cols["risk_score"]: "risk_score_daily"})
+            )
+    
+            _scores = pd.to_numeric(by_geoid["risk_score_daily"], errors="coerce").dropna()
+            if not _scores.empty:
+                rmap = by_geoid.set_index(geocol)["risk_score_daily"].to_dict()
+                try:
+                    q25, q50, q75 = _scores.quantile([0.25, 0.50, 0.75]).tolist()
+                except Exception:
+                    q25 = q50 = q75 = None
 
     def level_of(v: float) -> str:
         # Küçük harf döndür — COLOR_MAP ile birebir uyumlu
