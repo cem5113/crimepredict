@@ -199,52 +199,61 @@ def read_table_smart(spec: str) -> pd.DataFrame:
 def _ensure_hourly_schema(df: pd.DataFrame) -> pd.DataFrame:
     cols_lower = {c.lower(): c for c in df.columns}
 
-    # GEOID
+    # --- GEOID ---
     geokey = None
     for k in ("geoid", "GEOID", "cell_id", "id"):
-        if k in df.columns:
-            geokey = k; break
-        if k.lower() in cols_lower:
-            geokey = cols_lower[k.lower()]; break
+        if k in df.columns: geokey = k; break
+        if k.lower() in cols_lower: geokey = cols_lower[k.lower()]; break
     if geokey is None:
         raise ValueError("GEOID/Cell ID kolonu bulunamadı.")
     df = df.rename(columns={geokey: "geoid"})
     df["geoid"] = df["geoid"].astype(str)
 
-    # timestamp
+    # --- Zaman (3 yol: timestamp/datetime | date+hour | date+hour_range) ---
     if "timestamp" in df.columns:
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=False)
     elif "datetime" in df.columns:
         df["timestamp"] = pd.to_datetime(df["datetime"], utc=False)
     else:
-        # CSV biçimi: date + hour_range ("00-03", "03-06", ...)
-        date_col = "date" if "date" in df.columns else None
-        hr_col   = "hour_range" if "hour_range" in df.columns else None
-        if date_col and hr_col:
-            d0 = pd.to_datetime(df[date_col], errors="coerce").dt.floor("D")
-            # hour_range'ten başlangıç saati
+        date_col = None
+        for k in ("date", "Date", "DATE"):
+            if k in df.columns: date_col = k; break
+        if date_col is None:
+            raise ValueError("Saatlik veri için 'timestamp/datetime' ya da 'date' tabanlı kolonlar bekleniyor.")
+
+        d0 = pd.to_datetime(df[date_col], errors="coerce").dt.floor("D")
+
+        hour_col = None
+        for k in ("hour", "Hour", "HOUR"):
+            if k in df.columns: hour_col = k; break
+
+        if hour_col is not None:
+            h = pd.to_numeric(df[hour_col], errors="coerce").fillna(0).astype(int).clip(0, 23)
+            df["timestamp"] = d0 + pd.to_timedelta(h, unit="h")
+        else:
+            hr_col = None
+            for k in ("hour_range","Hour_Range","HOUR_RANGE"):
+                if k in df.columns: hr_col = k; break
+            if hr_col is None:
+                raise ValueError("Saatlik tabloda 'timestamp/datetime' ya da 'date+hour' / 'date+hour_range' kolonları yok.")
             start_h = (
                 df[hr_col].astype(str)
                 .str.extract(r"^(\d{1,2})")[0]
                 .fillna("0").astype(int).clip(0, 23)
             )
             df["timestamp"] = d0 + pd.to_timedelta(start_h, unit="h")
-        else:
-            raise ValueError("Saatlik tabloda 'timestamp/datetime' ya da 'date+hour_range' kolonları yok.")
 
-    # category
+    # --- category ---
     if "category" not in df.columns:
         df["category"] = "Genel"
     else:
         df["category"] = df["category"].astype(str)
 
-    # p_stack (olasılık)
+    # --- p_stack (olasılık) ---
     if "p_stack" not in df.columns:
-        # risk_score varsa eşle
         score_col = None
         for c in ("risk_score", "risk", "prob", "probability", "score"):
-            if c in df.columns:
-                score_col = c; break
+            if c in df.columns: score_col = c; break
         if score_col is None:
             raise ValueError("Beklenen olasılık kolonu yok: p_stack / risk_score")
         df = df.rename(columns={score_col: "p_stack"})
@@ -312,7 +321,7 @@ def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
 # Varsayılan yollar (AUTO: artifact -> release)
 # ---------------------------
 # risk_hourly çoğu zaman CSV; parquet varsa onu da okur
-DEFAULT_HOURLY = "urlzip::AUTO::artifact/risk_hourly.csv"
+DEFAULT_HOURLY = "urlzip::AUTO::artifact/risk_hourly.parquet"
 DEFAULT_DAILY  = "urlzip::AUTO::fr_crime_09.parquet"   # opsiyonel
 
 # ---------------------------
