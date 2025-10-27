@@ -20,7 +20,7 @@ REPO_OWNER = "cem5113"
 REPO_NAME  = "crime_prediction_data"
 
 # Release fallback (varsa)
-RELEASE_ASSET_ZIP = "fr-crime-outputs-parquet.zip"
+RELEASE_ASSET_ZIP = "fr-minimal-parquet"
 
 # Varsayılan girdi: Kaynağı OTOMATİK seç (artifact -> release)
 # ve içinden fr_crime_09.parquet'ı oku
@@ -96,9 +96,9 @@ def _best_zip_url() -> Tuple[str, dict]:
         return url, headers
 
     # Eski ad yedek
-    url, headers = _resolve_artifact_zip_url(REPO_OWNER, REPO_NAME, "fr-crime-outputs-parquet", token)
+    url, headers = _resolve_artifact_zip_url(REPO_OWNER, REPO_NAME, "fr-minimal-parquet", token)
     if url:
-        return url, headers
+        return url, headers 
 
     # Release fallback (yalnız Release asset yayınlıyorsan işe yarar)
     rel = f"https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/latest/download/{RELEASE_ASSET_ZIP}"
