@@ -1,9 +1,8 @@
-# pages/1_🏠_Ana_Sayfa.py
+# pages/1_🏠_Ana_Sayfa.py — Düzeltilmiş sürüm
+
 import streamlit as st
 from components.last_update import show_last_update_badge
 from components.meta import MODEL_VERSION, MODEL_LAST_TRAIN
-
-st.set_page_config(page_title="🏠 Ana Sayfa", layout="wide")
 
 def render_home():
     st.title("🏠 Ana Sayfa")
@@ -14,8 +13,10 @@ def render_home():
     )
     st.success("Veri pipeline’ı ve model güncellemeleri her gün otomatik olarak yapılır.")
 
+# Sayfa içeriğini çiz
 render_home()
 
+# Model sürümü ve son eğitim bilgisi
 show_last_update_badge(
     data_upto=None,
     model_version=MODEL_VERSION,
