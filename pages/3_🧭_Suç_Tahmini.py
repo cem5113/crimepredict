@@ -66,7 +66,7 @@ def _best_zip_url():
     url, headers = _resolve_artifact_zip_url(REPO_OWNER, REPO_NAME, "fr-minimal-parquet")
     if url:
         return url, headers
-    # eski ad(lar) yedek (istersen tut)
+    # eski ad(lar) yedek
     url, headers = _resolve_artifact_zip_url(REPO_OWNER, REPO_NAME, "fr-crime-outputs-parquet")
     if url:
         return url, headers
@@ -339,7 +339,7 @@ hourly_path = st.sidebar.text_input(
     help=(
         "Örnekler:\n"
         "- URL ZIP (AUTO): urlzip::AUTO::risk_hourly.parquet (parquet de olabilir)\n"
-        "- Yerel ZIP: zip::/path/to/fr-minimal-parquet.zip::risk_hourly.parquet
+        "- Yerel ZIP: zip::/path/to/fr-minimal-parquet.zip::risk_hourly.parquet\n"
         "- Düz CSV/Parquet: /path/to/risk_hourly.csv | .parquet"
     ),
 )
@@ -349,7 +349,7 @@ daily_path  = st.sidebar.text_input(
     help=(
         "Örnekler:\n"
         "- URL ZIP (AUTO): urlzip::AUTO::fr_crime_09.parquet\n"
-        "- Yerel ZIP: zip::/path/to/fr-crime-outputs-parquet.zip::fr_crime_09.parquet\n"
+        "- Yerel ZIP: zip::/path/to/fr-minimal-parquet.zip::fr_crime_09.parquet\n"
         "- Düz parquet/csv: /path/to/risk_daily_by_category.parquet"
     ),
 )
