@@ -100,31 +100,27 @@ def _best_zip_url() -> Tuple[str, dict]:
 # -----------------------
 # Okuyucular (ZIP/URL/yerel)
 # -----------------------
-def _read_parquet_from_zip_bytes(zip_bytes: bytes, member_path: str) -> pd.DataFrame:
-    """
-    ZIP içinden member_path'i Parquet olarak okur.
-    - Doğrudan eşleşme
-    - Aynı dosya adını (basename) klasör içinde bulma
-    - İç ZIP'leri (.zip) tarama (ör. fr_parquet_outputs.zip)
-    - artifact/ klasörü altını destekler
-    """
-    target_base = posixpath.basename(member_path)
+def _read_table_from_zip_bytes(zip_bytes: bytes, member_path: str) -> pd.DataFrame:
+    """ZIP/inner-ZIP içinde member_path'i CSV/Parquet olarak okur."""
+    def _read(fp, name):
+        return pd.read_csv(fp) if name.lower().endswith(".csv") else pd.read_parquet(fp)
 
+    target_base = posixpath.basename(member_path)
     with zipfile.ZipFile(BytesIO(zip_bytes)) as z:
         names = z.namelist()
 
-        # 1) Birebir
+        # 1) birebir
         if member_path in names:
             with z.open(member_path) as f:
-                return pd.read_parquet(BytesIO(f.read()))
+                return _read(BytesIO(f.read()), member_path)
 
-        # 1.b) Basename ile eşleşen ilk dosya
+        # 1.b) basename ile
         cand = [n for n in names if n.endswith("/"+target_base) or n == target_base]
         if cand:
             with z.open(cand[0]) as f:
-                return pd.read_parquet(BytesIO(f.read()))
+                return _read(BytesIO(f.read()), cand[0])
 
-        # 2) İç ZIP'leri tara
+        # 2) iç ZIP
         for n in names:
             if not n.lower().endswith(".zip"):
                 continue
@@ -132,84 +128,115 @@ def _read_parquet_from_zip_bytes(zip_bytes: bytes, member_path: str) -> pd.DataF
                 inner = z2.namelist()
                 if member_path in inner:
                     with z2.open(member_path) as f2:
-                        return pd.read_parquet(BytesIO(f2.read()))
+                        return _read(BytesIO(f2.read()), member_path)
                 cand2 = [m for m in inner if m.endswith("/"+target_base) or m == target_base]
                 if cand2:
                     with z2.open(cand2[0]) as f2:
-                        return pd.read_parquet(BytesIO(f2.read()))
-
+                        return _read(BytesIO(f2.read()), cand2[0])
     raise FileNotFoundError(f"ZIP içinde bulunamadı: {member_path}")
-
+    
 def _read_input(path: str) -> pd.DataFrame:
     """
     Desteklenen biçimler:
-      - Düz parquet: /path/file.parquet
-      - CSV:         /path/file.csv
-      - Yerel ZIP:   zip::/path/file.zip::fr_crime_09.parquet
-      - URL ZIP:     urlzip::AUTO::fr_crime_09.parquet  (veya doğrudan urlzip::<URL>::<member>)
+      - Düz parquet/csv: /path/file.parquet | /path/file.csv
+      - Yerel ZIP:       zip::/path/file.zip::artifact/risk_hourly.parquet|.csv
+      - URL ZIP:         urlzip::AUTO::artifact/risk_hourly.parquet|.csv
+                         (AUTO = artifact->release fallback)
     """
     if path.startswith("urlzip::"):
         url, member = path[len("urlzip::"):].split("::", 1)
-
         headers = {}
         if url == "AUTO":
             url, headers = _best_zip_url()
-
         r = requests.get(url, headers=headers, timeout=120, allow_redirects=True)
         r.raise_for_status()
-        return _read_parquet_from_zip_bytes(r.content, member)
+        return _read_table_from_zip_bytes(r.content, member)
 
     if path.startswith("zip::"):
         zip_path, member = path[len("zip::"):].split("::", 1)
         if not os.path.exists(zip_path):
             raise FileNotFoundError(f"ZIP yok: {zip_path}")
         with open(zip_path, "rb") as f:
-            return _read_parquet_from_zip_bytes(f.read(), member)
+            return _read_table_from_zip_bytes(f.read(), member)
 
     # düz dosya
     if not os.path.exists(path):
         raise FileNotFoundError(f"Girdi yok: {path}")
-    if path.endswith(".parquet"):
-        return pd.read_parquet(path)
-    if path.endswith(".csv"):
+    if path.lower().endswith(".csv"):
         return pd.read_csv(path)
+    if path.lower().endswith(".parquet"):
+        return pd.read_parquet(path)
     raise ValueError("Desteklenmeyen format (yalnızca parquet/csv/zip/urlzip).")
-
 
 # -----------------------
 # Yardımcılar
 # -----------------------
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Girdiyi ortak şemaya dönüştürür:
+      - datetime (varsa: datetime/timestamp/event_time/date_time; yoksa: date+hour_range -> datetime)
+      - geoid (GEOID/Cell_id vb. varyantlardan)
+      - category (yoksa 'Genel')
+      - Y_label (y_label -> Y_label)
+    """
+    # --- kolon isimlerini rahat eşlemek için lowercase haritası
     lower = {c.lower(): c for c in df.columns}
 
-    # datetime alanını adlandır
+    # --- GEOID / hücre kimliği
+    geokey = None
+    for cand in ("geoid", "GEOID", "geoid10", "geoid11", "cell_id", "id"):
+        if cand in df.columns:
+            geokey = cand
+            break
+        if cand.lower() in lower:
+            geokey = lower[cand.lower()]
+            break
+    if geokey is not None and geokey != "geoid":
+        df = df.rename(columns={geokey: "geoid"})
+    if "geoid" not in df.columns:
+        raise ValueError("Girdi verisinde GEOID/cell_id alanı bulunamadı.")
+    df["geoid"] = df["geoid"].astype(str)
+
+    # --- datetime alanı; yoksa date + hour_range'ten üret
+    # 1) bilinen timestamp adları
     if "datetime" not in df.columns and "datetime" in lower:
         df = df.rename(columns={lower["datetime"]: "datetime"})
     if "datetime" not in df.columns:
-        for cand in ["received_time", "timestamp", "event_time", "date_time"]:
+        for cand in ("received_time", "timestamp", "event_time", "date_time"):
             if cand in df.columns:
                 df = df.rename(columns={cand: "datetime"})
                 break
 
-    # GEOID/geo alanı
-    if "geoid" not in df.columns and "GEOID" in df.columns:
-        df = df.rename(columns={"GEOID": "geoid"})
+    # 2) CSV biçimi: date + hour_range ("00-03", "3-6" vb.) -> datetime başlangıç saati
+    if "datetime" not in df.columns and {"date", "hour_range"}.issubset(df.columns):
+        d0 = pd.to_datetime(df["date"], errors="coerce").dt.floor("D")
+        start_h = (
+            df["hour_range"].astype(str)
+            .str.extract(r"^(\d{1,2})")[0]
+            .fillna("0").astype(int).clip(0, 23)
+        )
+        df["datetime"] = d0 + pd.to_timedelta(start_h, unit="h")
 
-    if "category" not in df.columns:
-        df["category"] = "Genel"
-
+    # 3) yine de yoksa hata
     if "datetime" not in df.columns:
-        raise ValueError("Girdi verisinde datetime/timestamp alanı bulunamadı.")
+        raise ValueError("Girdi verisinde datetime/timestamp alanı (veya date+hour_range) bulunamadı.")
+
+    # zaman tipini netleştir
     df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce", utc=False)
     df = df.dropna(subset=["datetime"])
 
-    if "Y_label" not in df.columns and "y_label" in df.columns:
-        df = df.rename(columns={"y_label": "Y_label"})
+    # --- kategori
+    if "category" not in df.columns:
+        df["category"] = "Genel"
+    else:
+        df["category"] = df["category"].astype(str)
 
-    df["geoid"] = df["geoid"].astype(str)
-    df["category"] = df["category"].astype(str)
+    # --- etiket adı normalizasyonu
+    if "Y_label" not in df.columns and ("y_label" in df.columns or "y_label" in lower):
+        src = "y_label" if "y_label" in df.columns else lower["y_label"]
+        df = df.rename(columns={src: "Y_label"})
+
     return df
-
 
 def _ensure_base_flags(df: pd.DataFrame) -> pd.DataFrame:
     if "hour" not in df.columns:
