@@ -24,7 +24,7 @@ st.set_page_config(page_title="Suç Tahmini", page_icon="🌀", layout="wide")
 # ---------------------------
 REPO_OWNER = "cem5113"
 REPO_NAME  = "crime_prediction_data"
-RELEASE_ASSET_ZIP = "fr-crime-outputs-parquet.zip"   # fallback
+RELEASE_ASSET_ZIP = "fr-minimal-parquet" 
 
 def _resolve_token() -> str | None:
     # env > secrets sırası
