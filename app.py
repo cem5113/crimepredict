@@ -155,3 +155,33 @@ st.markdown(
 - Token güvenlik nedeniyle asla ekranda gösterilmez; yalnızca var/yok statüsü paylaşılır.
 """
 )
+
+with st.expander("🧪 Health Check", expanded=True):
+    import sys, pathlib, glob, os
+    st.write("CWD:", os.getcwd())
+    st.write("Python:", sys.version)
+    st.write("Repo root list (ilk 30):", os.listdir()[:30])
+
+    pages = list(pathlib.Path("pages").glob("*.py"))
+    st.write("Pages:", [p.name for p in pages])
+
+    try:
+        import components.config as _cfg
+        st.success("components.config import OK")
+    except Exception as e:
+        st.error(f"components.config import HATA: {e!s}")
+
+    bad = []
+    for p in pages:
+        try:
+            first = open(p, "r", encoding="utf-8").readline().strip()
+            if p.name[0].isdigit() and not first.startswith(("#", "from", "import")):
+                bad.append((p.name, first))
+        except Exception as e:
+            bad.append((p.name, f"okunamadı: {e!s}"))
+    if bad:
+        st.error("Şüpheli page dosyaları (ilk satır):")
+        for name, first in bad:
+            st.code(f"{name} → {first}")
+    else:
+        st.info("Page ilk satırları temiz görünüyor.")
