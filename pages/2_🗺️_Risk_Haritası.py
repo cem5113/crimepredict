@@ -19,7 +19,7 @@ st.markdown(
 cfg = st.secrets if hasattr(st, "secrets") else {}
 OWNER = cfg.get("artifact_owner", "cem5113")
 REPO = cfg.get("artifact_repo", "crime_prediction_data")
-ARTIFACT_NAME = cfg.get("artifact_name", "sf-crime-parquet")
+ARTIFACT_NAME = cfg.get("artifact_name", "fr-minimal-parquet")
 EXPECTED_PARQUET = "risk_hourly.parquet"
 
 GEOJSON_PATH_LOCAL_DEFAULT = cfg.get("geojson_path", "data/sf_cells.geojson")
