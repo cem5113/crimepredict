@@ -72,14 +72,33 @@ def _best_zip_url():
 # ---------------------------
 # ZIP/URL/yerel akıllı okuyucu (CSV + Parquet, iç ZIP dahil)
 # ---------------------------
+def _read_any_table_from_bytes(raw: bytes, name_hint: str = "") -> pd.DataFrame:
+    bio = BytesIO(raw)
+    # ipucu uzantısı varsa önce onu dene
+    if name_hint.lower().endswith(".csv"):
+        try:
+            bio.seek(0); return pd.read_csv(bio)
+        except Exception:
+            pass
+    if name_hint.lower().endswith(".parquet"):
+        try:
+            bio.seek(0); return pd.read_parquet(bio)
+        except Exception:
+            pass
+    # ipucu yoksa parquet -> csv sırala
+    try:
+        bio.seek(0); return pd.read_parquet(bio)
+    except Exception:
+        bio.seek(0); return pd.read_csv(bio)
+
 def _read_table_from_zip_bytes(zip_bytes: bytes, member_path: str) -> pd.DataFrame:
-    """
-    ZIP/inner-ZIP içinde member_path'i CSV/Parquet olarak okur.
-    - Doğrudan eşleşme
-    - Basename ile eşleştirme
-    - İç ZIP'lerde arama (.zip)
-    Okuma biçimi uzantıdan anlaşılır (.csv | .parquet).
-    """
+    # ZIP değilse doğrudan dosya olarak dene
+    try:
+        with zipfile.ZipFile(BytesIO(zip_bytes)) as _z:
+            pass
+    except zipfile.BadZipFile:
+        return _read_any_table_from_bytes(zip_bytes, name_hint=member_path)
+        
     def _read(fp, name):
         if name.lower().endswith(".csv"):
             return pd.read_csv(fp)
@@ -341,10 +360,10 @@ time_mode = st.sidebar.radio("Zaman seçimi", ["Tek saat", "Gün (24 saat)", "Ar
 ts_single = day_single = start_range = end_range = None
 if time_mode == "Tek saat":
     ts_candidates = sorted(pd.to_datetime(df["timestamp"]).unique())
-    ts_single = st.sidebar.selectbox("Zaman (timestamp)", options=ts_candidates, index=0 if ts_candidates else None)
+    ts_single = st.sidebar.selectbox("Zaman (timestamp)", options=ts_candidates, index=0) if ts_candidates else None
 elif time_mode == "Gün (24 saat)":
     days = sorted(pd.to_datetime(df["timestamp"]).dt.date.unique())
-    day_single = st.sidebar.selectbox("Gün", options=days, index=0 if days else None)
+    day_single = st.sidebar.selectbox("Gün", options=days, index=0) if days else None
 else:
     ts_all = sorted(pd.to_datetime(df["timestamp"]).unique())
     if ts_all:
@@ -357,12 +376,22 @@ else:
 cats = sorted(df["category"].astype(str).unique().tolist())
 geoids = sorted(df["geoid"].astype(str).unique().tolist())
 
-sel_cats = st.sidebar.multiselect("Suç kategorileri", options=cats, default=cats)
+# Boşsa hata vermesin diye güvenli default
+sel_cats = st.sidebar.multiselect(
+    "Suç kategorileri",
+    options=cats,
+    default=cats if cats else [],
+)
+
 scope_choice = st.sidebar.radio("Alan", ["Tüm şehir", "GEOID seç"], horizontal=True)
 if scope_choice == "GEOID seç":
-    sel_geoids = st.sidebar.multiselect("GEOID", options=geoids, default=geoids[:20])
+    sel_geoids = st.sidebar.multiselect(
+        "GEOID",
+        options=geoids,
+        default=geoids[:20] if geoids else [],
+    )
 else:
-    sel_geoids = geoids
+    sel_geoids = geoids if geoids else []
 
 agg_daily_how = st.sidebar.selectbox("Günlük agregasyon (görünüm)", ["Ortalama", "Maksimum"], index=0)
 top_k = st.sidebar.slider("Top-K sıralama (tablo)", min_value=10, max_value=200, value=50, step=10)
