@@ -145,7 +145,7 @@ def read_table_smart(spec: str) -> pd.DataFrame:
     spec biçimleri:
       - Yerel dosya:         /path/to/file.parquet | .csv
       - Yerel zip içi:       zip::/path/file.zip::artifact/risk_hourly.parquet
-      - URL zip içi:         urlzip::<URL veya AUTO>::artifact/risk_hourly.parquet
+      - URL zip içi:         urlzip::<URL veya AUTO>::risk_hourly.parquet
                              (Bulunamazsa otomatik .csv versiyonunu da dener)
     """
     def _try(url_or_bytes, member, from_zip: bool, headers=None):
@@ -324,7 +324,7 @@ def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
 # ---------------------------
 # Varsayılan yollar (AUTO: artifact -> release)
 # ---------------------------
-# risk_hourly çoğu zaman CSV; parquet varsa onu da okur
+# Yeni artifact paketinde dosyalar kök seviyede
 DEFAULT_HOURLY = "urlzip::AUTO::risk_hourly.parquet"
 DEFAULT_DAILY  = "urlzip::AUTO::fr_crime_09.parquet"
 
@@ -338,7 +338,7 @@ hourly_path = st.sidebar.text_input(
     value=DEFAULT_HOURLY,
     help=(
         "Örnekler:\n"
-        "- URL ZIP (AUTO): urlzip::AUTO::risk_hourly.parquet (parquet de olabilir)\n"
+        "- URL ZIP (AUTO): urlzip::AUTO::risk_hourly.parquet (csv de olabilir)\n"
         "- Yerel ZIP: zip::/path/to/fr-minimal-parquet.zip::risk_hourly.parquet\n"
         "- Düz CSV/Parquet: /path/to/risk_hourly.csv | .parquet"
     ),
