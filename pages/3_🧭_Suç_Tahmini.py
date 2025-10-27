@@ -62,10 +62,14 @@ def _resolve_artifact_zip_url(owner: str, repo: str, name_contains: str):
     return url, _gh_headers()
 
 def _best_zip_url():
+    # önce yeni artifact adı
+    url, headers = _resolve_artifact_zip_url(REPO_OWNER, REPO_NAME, "fr-minimal-parquet")
+    if url:
+        return url, headers
+    # eski ad(lar) yedek (istersen tut)
     url, headers = _resolve_artifact_zip_url(REPO_OWNER, REPO_NAME, "fr-crime-outputs-parquet")
     if url:
         return url, headers
-    # Release fallback
     rel = f"https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/latest/download/{RELEASE_ASSET_ZIP}"
     return rel, {}
 
@@ -321,8 +325,8 @@ def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
 # Varsayılan yollar (AUTO: artifact -> release)
 # ---------------------------
 # risk_hourly çoğu zaman CSV; parquet varsa onu da okur
-DEFAULT_HOURLY = "urlzip::AUTO::artifact/risk_hourly.parquet"
-DEFAULT_DAILY  = "urlzip::AUTO::fr_crime_09.parquet"   # opsiyonel
+DEFAULT_HOURLY = "urlzip::AUTO::risk_hourly.parquet"
+DEFAULT_DAILY  = "urlzip::AUTO::fr_crime_09.parquet"
 
 # ---------------------------
 # Sidebar — seçimler
@@ -334,8 +338,8 @@ hourly_path = st.sidebar.text_input(
     value=DEFAULT_HOURLY,
     help=(
         "Örnekler:\n"
-        "- URL ZIP (AUTO): urlzip::AUTO::artifact/risk_hourly.csv  (parquet de olabilir)\n"
-        "- Yerel ZIP: zip::/path/to/fr-crime-outputs-parquet.zip::artifact/risk_hourly.csv\n"
+        "- URL ZIP (AUTO): urlzip::AUTO::risk_hourly.parquet (parquet de olabilir)\n"
+        "- Yerel ZIP: zip::/path/to/fr-minimal-parquet.zip::risk_hourly.parquet
         "- Düz CSV/Parquet: /path/to/risk_hourly.csv | .parquet"
     ),
 )
