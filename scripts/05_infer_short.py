@@ -5,39 +5,23 @@
 - SHORT motor (0–72 saat) için stacking modelleriyle tahmin üretir.
 - Çıktı: data/outputs/risk_short.parquet
 
-Kullanım (varsayılan yollarla):
+Kullanım:
   python scripts/05_infer_short.py \
     --features_dir data/features/short \
     --models_dir models/short \
     --out_path data/outputs/risk_short.parquet \
     --horizons 1,2,3,6,12,24,48,72
-
-Girdiler:
-- data/features/short/features_h{H}.parquet
-  (içinden, her geoid×category için **en güncel** feature satırını (t0) alır ve t0+H için tahmin yazar)
-- models/short/
-  base_xgb_h{H}_C{cat}.pkl, base_lgb_h{H}_C{cat}.pkl, base_rf_h{H}_C{cat}.pkl,
-  meta_stack_h{H}_C{cat}.pkl, calibrator_h{H}_C{cat}.pkl,
-  feature_order_h{H}_C{cat}.json
-
-Çıktı şeması:
-- timestamp (t0 + H saat)
-- horizon_h
-- geoid
-- category
-- p_stack  (kalibre edilmiş)
-- engine   = 'short'
-- confidence ∈ [0,1]
 """
 
 import os
 import json
 import argparse
-from typing import List, Dict
+from typing import List, Dict, Tuple
 import numpy as np
 import pandas as pd
 import joblib
 from math import exp
+
 
 # -----------------------
 # Argümanlar
@@ -53,7 +37,7 @@ def parse_args():
     ap.add_argument("--horizons", type=str, default="1,2,3,6,12,24,48,72",
                     help="Saat cinsinden ufuk listesi (virgülle)")
     ap.add_argument("--confidence_lambda", type=float, default=0.05,
-                    help="Confidence için exponential decay katsayısı (gün bazında)")
+                    help="confidence = exp(-λ * horizon_days)")
     return ap.parse_args()
 
 
@@ -62,69 +46,86 @@ def parse_args():
 # -----------------------
 def read_features_for_horizon(features_dir: str, H: int) -> pd.DataFrame:
     """
-    Eğitimde kullandığımız feature dosyasını okur.
-    Inference'ta **her geoid×category** için en **güncel** (max datetime) satırı alırız.
+    features_h{H}.parquet -> her (geoid, category) için en güncel satır (t0).
     """
     path = os.path.join(features_dir, f"features_h{H}.parquet")
     if not os.path.exists(path):
         raise FileNotFoundError(f"Feature dosyası yok: {path}")
+
     df = pd.read_parquet(path)
     if "datetime" not in df.columns:
         raise ValueError(f"features_h{H}.parquet içinde 'datetime' yok")
 
-    # Her (geoid, category) için en güncel t0
-    df = df.sort_values(["geoid", "category", "datetime"])
-    idx = df.groupby(["geoid", "category"], as_index=False)["datetime"].idxmax()
-    latest = df.loc[idx.values].reset_index(drop=True)
+    # (geoid,category) için max datetime satırı
+    df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce", utc=False)
+    df = df.dropna(subset=["datetime", "geoid", "category"])
+    if df.empty:
+        raise ValueError(f"features_h{H}.parquet temizleme sonrası boş")
 
-    # Modelin istemediği kolonları burada dert etmiyoruz; seçim ve sırayı feature_order ile yapacağız.
+    df = df.sort_values(["geoid", "category", "datetime"])
+    # pandas >=1.4: idxmax çalışır; eski sürümler için agg ile de çözülebilir
+    idx = df.groupby(["geoid", "category"])["datetime"].idxmax()
+    latest = df.loc[idx].reset_index(drop=True)
     return latest
 
 
 def list_categories_from_models(models_dir: str, H: int) -> List[str]:
     """
-    Modellerden kategori listesi çıkar (meta veya feature_order dosyalarına bakarak).
+    Modellerden kategori listesi çıkar (meta_stack veya feature_order dosyalarına bakarak).
     """
-    cats = []
+    if not os.path.isdir(models_dir):
+        return []
+    cats = set()
     prefix = f"_h{H}_C"
     for fname in os.listdir(models_dir):
-        if fname.startswith("meta_stack") and prefix in fname and fname.endswith(".pkl"):
-            # meta_stack_h{H}_C{cat}.pkl
-            # kategoriyi sondan çek
-            tag = fname.replace("meta_stack_", "").replace(".pkl", "")
-            # tag: h{H}_C{cat}
-            try:
-                cat = tag.split("_C", 1)[1]
-                cats.append(cat)
-            except Exception:
-                pass
-    return sorted(list(set(cats)))
+        if prefix in fname:
+            if fname.startswith("meta_stack_") and fname.endswith(".pkl"):
+                tag = fname.replace("meta_stack_", "").replace(".pkl", "")  # h{H}_C{cat}
+                try:
+                    cat = tag.split("_C", 1)[1]
+                    cats.add(cat)
+                except Exception:
+                    pass
+            elif fname.startswith("feature_order_") and fname.endswith(".json"):
+                tag = fname.replace("feature_order_", "").replace(".json", "")
+                try:
+                    cat = tag.split("_C", 1)[1]
+                    cats.add(cat)
+                except Exception:
+                    pass
+    return sorted(cats)
+
+
+def paths_for(H: int, cat: str, models_dir: str) -> Dict[str, str]:
+    tag = f"h{H}_C{cat}"
+    return {
+        "xgb":   os.path.join(models_dir, f"base_xgb_{tag}.pkl"),
+        "lgb":   os.path.join(models_dir, f"base_lgb_{tag}.pkl"),
+        "rf":    os.path.join(models_dir, f"base_rf_{tag}.pkl"),
+        "meta":  os.path.join(models_dir, f"meta_stack_{tag}.pkl"),
+        "cal":   os.path.join(models_dir, f"calibrator_{tag}.pkl"),
+        "order": os.path.join(models_dir, f"feature_order_{tag}.json"),
+    }
 
 
 def load_artifacts_for(H: int, cat: str, models_dir: str):
     """
     İlgili horizon+kategori için base, meta, kalibratör ve feature sırasını yükler.
     """
-    tag = f"h{H}_C{cat}"
-    paths = {
-        "xgb": os.path.join(models_dir, f"base_xgb_{tag}.pkl"),
-        "lgb": os.path.join(models_dir, f"base_lgb_{tag}.pkl"),
-        "rf":  os.path.join(models_dir, f"base_rf_{tag}.pkl"),
-        "meta":os.path.join(models_dir, f"meta_stack_{tag}.pkl"),
-        "cal": os.path.join(models_dir, f"calibrator_{tag}.pkl"),
-        "order": os.path.join(models_dir, f"feature_order_{tag}.json"),
-    }
-    for k, p in paths.items():
-        if not os.path.exists(p):
-            raise FileNotFoundError(f"Artefakt yok: {p}")
+    p = paths_for(H, cat, models_dir)
+    missing = [k for k, v in p.items() if not os.path.exists(v)]
+    if missing:
+        raise FileNotFoundError(f"[H{H}][{cat}] Eksik artefakt(lar): {missing}")
 
-    xgb = joblib.load(paths["xgb"])
-    lgb = joblib.load(paths["lgb"])
-    rf  = joblib.load(paths["rf"])
-    meta= joblib.load(paths["meta"])
-    cal = joblib.load(paths["cal"])
-    with open(paths["order"], "r", encoding="utf-8") as f:
+    xgb  = joblib.load(p["xgb"])
+    lgb  = joblib.load(p["lgb"])
+    rf   = joblib.load(p["rf"])
+    meta = joblib.load(p["meta"])
+    cal  = joblib.load(p["cal"])
+    with open(p["order"], "r", encoding="utf-8") as f:
         order = json.load(f)["features"]
+    if not isinstance(order, list) or not order:
+        raise ValueError(f"[H{H}][{cat}] feature_order boş/bozuk: {p['order']}")
     return xgb, lgb, rf, meta, cal, order
 
 
@@ -142,90 +143,116 @@ def ensure_feature_matrix(df: pd.DataFrame, order: List[str]) -> pd.DataFrame:
 
 def calc_confidence(h: int, lam: float) -> float:
     """
-    Ufuk büyüdükçe azalan güven: confidence = exp(-λ * horizon_days)
+    Ufuk büyüdükçe azalan güven: confidence = exp(-λ * (h/24))
     """
-    horizon_days = h / 24.0
-    c = exp(-lam * horizon_days)
-    return max(0.0, min(1.0, float(c)))
+    return float(max(0.0, min(1.0, exp(-lam * (h / 24.0)))))
 
 
 # -----------------------
 # Inference
 # -----------------------
+def infer_one_horizon(H: int,
+                      features_dir: str,
+                      models_dir: str,
+                      confidence_lambda: float) -> pd.DataFrame:
+    """
+    Tek bir horizon için tüm kategorilerde tahmin üret.
+    """
+    feat_latest = read_features_for_horizon(features_dir, H)
+    cats = list_categories_from_models(models_dir, H)
+    if not cats:
+        print(f"[H{H}] Uyarı: '{models_dir}' altında kategoriye ait model bulunamadı; atlanıyor.")
+        return pd.DataFrame()
+
+    out_rows = []
+
+    for cat in cats:
+        try:
+            xgb, lgb, rf, meta, cal, order = load_artifacts_for(H, cat, models_dir)
+        except Exception as e:
+            print(f"[H{H}][{cat}] Artefakt yüklenemedi: {e}")
+            continue
+
+        dff = feat_latest[feat_latest["category"].astype(str) == str(cat)].copy()
+        if dff.empty:
+            print(f"[H{H}][{cat}] İnference için veri yok; atlandı.")
+            continue
+
+        X = ensure_feature_matrix(dff, order)
+
+        # Base olasılıklar
+        try:
+            p1 = xgb.predict_proba(X)[:, 1]
+            p2 = lgb.predict_proba(X)[:, 1]
+            p3 = rf.predict_proba(X)[:, 1]
+        except Exception as e:
+            print(f"[H{H}][{cat}] Base predict_proba hatası: {e}")
+            continue
+
+        stack_mat = np.vstack([p1, p2, p3]).T
+
+        # Meta + kalibrasyon
+        try:
+            p_meta  = meta.predict_proba(stack_mat)[:, 1]
+            p_stack = cal.predict_proba(stack_mat)[:, 1]
+        except Exception as e:
+            print(f"[H{H}][{cat}] Meta/Cal predict_proba hatası: {e}")
+            continue
+
+        ts = pd.to_datetime(dff["datetime"]) + pd.to_timedelta(H, unit="h")
+        conf = calc_confidence(H, confidence_lambda)
+
+        out = pd.DataFrame({
+            "timestamp": ts.values,
+            "horizon_h": H,
+            "geoid": dff["geoid"].astype(str).values,
+            "category": dff["category"].astype(str).values,
+            "p_stack": p_stack.astype("float32"),
+            "engine": "short",
+            "confidence": conf
+        })
+        out_rows.append(out)
+
+    if not out_rows:
+        return pd.DataFrame()
+
+    res = pd.concat(out_rows, ignore_index=True)
+    # Güvenli birleştirme (teorik olarak dupe olmamalı)
+    res = (res.groupby(["timestamp", "horizon_h", "geoid", "category", "engine"], as_index=False)
+              .agg(p_stack=("p_stack", "mean"), confidence=("confidence", "mean")))
+    return res.sort_values(["timestamp", "geoid", "category"]).reset_index(drop=True)
+
+
 def main():
     args = parse_args()
     os.makedirs(os.path.dirname(args.out_path), exist_ok=True)
 
     horizons = [int(x.strip()) for x in args.horizons.split(",") if x.strip()]
-    all_rows = []
+    all_parts: List[pd.DataFrame] = []
 
     for H in horizons:
-        # 1) En güncel feature satırları (t0) — her geoid×category için
-        feat_latest = read_features_for_horizon(args.features_dir, H)
+        try:
+            part = infer_one_horizon(
+                H=H,
+                features_dir=args.features_dir,
+                models_dir=args.models_dir,
+                confidence_lambda=args.confidence_lambda,
+            )
+        except Exception as e:
+            print(f"[H{H}] HATA: {e}")
+            part = pd.DataFrame()
 
-        # 2) Kategori listesini modellerden oku (hangi kategorilere model var?)
-        cats = list_categories_from_models(args.models_dir, H)
-        if not cats:
-            print(f"[H{H}] Uyarı: models/short altında kategoriye ait meta dosyası bulunamadı; atlanıyor.")
-            continue
+        if not part.empty:
+            all_parts.append(part)
+            print(f"[H{H}] tamamlandı: {len(part):,} satır.")
+        else:
+            print(f"[H{H}] çıktı boş.")
 
-        # 3) Her kategori için tahmin
-        for cat in cats:
-            # İlgili artefaktları yükle
-            try:
-                xgb, lgb, rf, meta, cal, order = load_artifacts_for(H, cat, args.models_dir)
-            except Exception as e:
-                print(f"[H{H}][{cat}] Artefakt yüklenemedi: {e}")
-                continue
-
-            dff = feat_latest[feat_latest["category"].astype(str) == str(cat)].copy()
-            if dff.empty:
-                print(f"[H{H}][{cat}] İnference için veri yok; atlandı.")
-                continue
-
-            # Feature matrisi
-            X = ensure_feature_matrix(dff, order)
-
-            # Base model olasılıkları
-            p1 = xgb.predict_proba(X)[:, 1]
-            p2 = lgb.predict_proba(X)[:, 1]
-            p3 = rf.predict_proba(X)[:, 1]
-            stack_mat = np.vstack([p1, p2, p3]).T
-
-            # Meta + kalibrasyon
-            p_meta = meta.predict_proba(stack_mat)[:, 1]
-            p_stack = cal.predict_proba(stack_mat)[:, 1]
-
-            # Hedef zaman damgası: t0 + H saat
-            ts = pd.to_datetime(dff["datetime"]) + pd.to_timedelta(H, unit="h")
-
-            # Confidence
-            conf = calc_confidence(H, args.confidence_lambda)
-
-            out = pd.DataFrame({
-                "timestamp": ts.values,
-                "horizon_h": H,
-                "geoid": dff["geoid"].astype(str).values,
-                "category": dff["category"].astype(str).values,
-                "p_stack": p_stack.astype("float32"),
-                "engine": "short",
-                "confidence": conf
-            })
-            all_rows.append(out)
-
-        print(f"[H{H}] tamamlandı.")
-
-    if not all_rows:
-        print("Uyarı: Üretilecek satır bulunamadı. Model veya feature kontrol edin.")
+    if not all_parts:
+        print("Uyarı: Üretilecek satır bulunamadı. Model/feature dizinlerini kontrol edin.")
         return
 
-    final = pd.concat(all_rows, ignore_index=True)
-    # Aynı (timestamp, geoid, category, horizon_h) için birden fazla satır varsa ortala (teorik olarak olmamalı)
-    final = (final
-             .groupby(["timestamp", "horizon_h", "geoid", "category", "engine"], as_index=False)
-             .agg(p_stack=("p_stack", "mean"), confidence=("confidence", "mean")))
-
-    final = final.sort_values(["timestamp", "geoid", "category"]).reset_index(drop=True)
+    final = pd.concat(all_parts, ignore_index=True)
     final.to_parquet(args.out_path, index=False)
     print(f"✅ SHORT inference tamam: {args.out_path} | satır: {len(final):,}")
 
