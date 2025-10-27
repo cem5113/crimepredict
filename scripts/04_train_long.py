@@ -9,41 +9,33 @@ Yaklaşım: Mevsimsel baseline (geoid×category×hour×dow) + deterministik/stat
 Girdi:
   data/features/long/features_h{H}.parquet
     Zorunlu min. kolonlar: geoid, category, datetime, hour, dow, month, is_weekend,
-                           (opsiyonel: is_holiday, season, statikler: poi_*, distance_*, population),
+                           (ops.: is_holiday, season, statikler: poi_*, distance_*, population),
                            Y_label_h{H}
 
 Çıktılar:
   models/long/
-    lr_h{H}_C{cat}.pkl                     # lojistik regresyon
-    calibrator_h{H}_C{cat}.pkl             # isotonic kalibratör
-    feature_order_h{H}_C{cat}.json         # inference'ta sütun sırası
-    baseline_map_h{H}_C{cat}.parquet       # (geoid,category,hour,dow) → baseline_rate
+    lr_h{H}_C{cat}.pkl
+    calibrator_h{H}_C{cat}.pkl
+    feature_order_h{H}_C{cat}.json
+    baseline_map_h{H}_C{cat}.parquet
   metrics/long/
     h{H}_C{cat}_aucpr.json
     h{H}_C{cat}_precision_at_k.json
     h{H}_C{cat}_calibration.json
-
-Kullanım:
-  python scripts/04_train_long.py \
-    --features_dir data/features/long \
-    --out_models models/long \
-    --out_metrics metrics/long \
-    --horizons 960,1440,2160 \
-    --n_folds 3 \
-    --precision_k 20,50
 """
 
 import os
 import json
 import argparse
 from typing import List, Tuple, Dict
+
 import numpy as np
 import pandas as pd
 
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import roc_auc_score, average_precision_score
 from sklearn.linear_model import LogisticRegression
-from sklearn.calibration import CalibratedClassifierCV
+from sklearn.isotonic import IsotonicRegression
 import joblib
 
 
@@ -78,7 +70,6 @@ def time_series_splits(df: pd.DataFrame, n_folds: int):
     return [(order[tr], order[va]) for tr, va in tss.split(order)]
 
 def pr_auc(y_true, y_prob) -> float:
-    from sklearn.metrics import average_precision_score
     return float(average_precision_score(y_true, y_prob))
 
 def precision_at_k_per_ts(df: pd.DataFrame, prob_col: str, k: int, label_col: str) -> float:
@@ -109,8 +100,7 @@ def reliability_bins(y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 10) -
 
 def build_baseline_map(train_df: pd.DataFrame, label_col: str) -> pd.DataFrame:
     """
-    Train döneminde Y_label üzerinden baseline oran tablosu üretir:
-    (geoid,category,hour,dow) → rate. Fallback sütunları da üretir.
+    (geoid,category,hour,dow) → rate; ayrıca category+hour+dow ve hour+dow fallback seviyeleri.
     """
     keys_full = ["geoid", "category", "hour", "dow"]
     keys_cat  = ["category", "hour", "dow"]
@@ -126,58 +116,49 @@ def build_baseline_map(train_df: pd.DataFrame, label_col: str) -> pd.DataFrame:
     m_cat  = agg_rate(train_df, keys_cat)
     m_hd   = agg_rate(train_df, keys_hd)
 
-    # Oranları 0..1 aralığında güvenli tut
     for m in (m_full, m_cat, m_hd):
         m["rate"] = m["rate"].clip(0.0, 1.0)
 
-    # Birleştirirken inference tarafında sırayla bakacağız (full → cat → hd)
-    # Burada hepsini tek Parquet’te saklayalım, level kolonu ile.
-    baseline_map = pd.concat([m_full, m_cat, m_hd], ignore_index=True)
-    return baseline_map
+    return pd.concat([m_full, m_cat, m_hd], ignore_index=True)
 
-def attach_baseline(df: pd.DataFrame, baseline_map: pd.DataFrame) -> pd.Series:
+def attach_baseline(df: pd.DataFrame, baseline_map: pd.DataFrame, global_mean: float) -> pd.Series:
     """
-    Train/valid sırasında baseline oranını (geoid,category,hour,dow) → rate olarak bağlar;
-    bulunamazsa category+hour+dow; yine yoksa hour+dow fallback.
+    Baseline oranını bağlar; bulunamazsa category+hour+dow; yine yoksa hour+dow; en sonda global_mean.
     """
-    # Önce full anahtar
     out = pd.merge(
         df[["geoid", "category", "hour", "dow"]].copy(),
         baseline_map[baseline_map["key_level"] == "geoid_category_hour_dow"],
         on=["geoid","category","hour","dow"], how="left"
     )["rate"]
 
-    # Fallback 1: category+hour+dow
-    missing = out.isna()
-    if missing.any():
+    miss = out.isna()
+    if miss.any():
         tmp = pd.merge(
-            df.loc[missing, ["category","hour","dow"]],
+            df.loc[miss, ["category","hour","dow"]],
             baseline_map[baseline_map["key_level"] == "category_hour_dow"],
             on=["category","hour","dow"], how="left"
         )["rate"]
-        out.loc[missing] = tmp.values
+        out.loc[miss] = tmp.values
 
-    # Fallback 2: hour+dow
-    missing = out.isna()
-    if missing.any():
+    miss = out.isna()
+    if miss.any():
         tmp = pd.merge(
-            df.loc[missing, ["hour","dow"]],
+            df.loc[miss, ["hour","dow"]],
             baseline_map[baseline_map["key_level"] == "hour_dow"],
             on=["hour","dow"], how="left"
         )["rate"]
-        out.loc[missing] = tmp.values
+        out.loc[miss] = tmp.values
 
-    # Son çare: global ortalama
     if out.isna().any():
-        out = out.fillna(df[label_col].mean())
+        out = out.fillna(float(global_mean))
 
     return out.clip(0.0, 1.0)
 
 def pick_features(df: pd.DataFrame, label_col: str, extra_num_cols: List[str]) -> Tuple[pd.DataFrame, pd.Series, List[str]]:
     """
     LONG için yalnız deterministik/statik + baseline kullanılacak.
-    - Kimlik/zaman/label hariç numeric kolonlar içinden güvenli olanları al.
-    - İsim bazlı filtre: future/lead/911/311/weather gibi kolonları dışla.
+    - Kimlik/zaman/label hariç numeric kolonlar
+    - Gelecek sızıntısı yaratabilecek isim kalıpları dışlanır
     """
     drop_cols = {"geoid","category","datetime",label_col}
     forbidden_tokens = [
@@ -193,10 +174,12 @@ def pick_features(df: pd.DataFrame, label_col: str, extra_num_cols: List[str]) -
             continue
         Xcols.append(c)
 
-    # Eklemek istediğimiz zorunlu deterministik/statik kolonlar
     for c in extra_num_cols:
-        if c in df.columns and c not in Xcols:
+        if c in df.columns and c not in Xcols and pd.api.types.is_numeric_dtype(df[c]):
             Xcols.append(c)
+
+    if not Xcols:
+        raise ValueError("Feature listesi boş! (filtre çok agresif olabilir)")
 
     X = df[Xcols].astype("float32")
     y = df[label_col].astype(int)
@@ -216,80 +199,81 @@ def train_one_h_cat(df: pd.DataFrame, H: int, cat: str,
         print(f"[LONG][H{H}][{cat}] veri yok, atlanıyor.")
         return
 
-    # Fold'lar (zaman)
+    dfx["datetime"] = pd.to_datetime(dfx["datetime"], errors="coerce", utc=False)
+    dfx = dfx.dropna(subset=["datetime"])
+    if dfx.empty:
+        print(f"[LONG][H{H}][{cat}] 'datetime' sonrası veri yok, atlanıyor.")
+        return
+
+    # Zaman bazlı fold'lar
     splits = time_series_splits(dfx, n_folds)
+    if not splits:
+        print(f"[LONG][H{H}][{cat}] split üretilemedi, atlanıyor.")
+        return
 
     # OOF konteyner
-    oof_idx = np.arange(len(dfx))
-    oof_prob = np.zeros(len(dfx), dtype="float32")
+    oof_prob_raw = np.zeros(len(dfx), dtype="float32")
 
-    # Fold bazlı eğitim
     fold_recs = []
-    feat_used = None
-    baseline_map_global = None  # en son full-train'den kaydetmek için
-
     for fi, (tr_idx, va_idx) in enumerate(splits, start=1):
         tr = dfx.iloc[tr_idx].copy()
         va = dfx.iloc[va_idx].copy()
 
-        # 1) Train kısmında baseline haritası oluştur
+        # Baseline haritası (train döneminden)
         baseline_map = build_baseline_map(tr, label_col)
+        global_mean = float(tr[label_col].mean()) if label_col in tr.columns else 0.0
 
-        # 2) Train/valid'e baseline_rate'i ekle
-        tr["baseline_rate"] = attach_baseline(tr, baseline_map).astype("float32")
-        va["baseline_rate"] = attach_baseline(va, baseline_map).astype("float32")
+        # Baseline oranını ekle
+        tr["baseline_rate"] = attach_baseline(tr, baseline_map, global_mean).astype("float32")
+        va["baseline_rate"] = attach_baseline(va, baseline_map, global_mean).astype("float32")
 
-        # 3) Deterministik/statik kolonlar (güvenli) + baseline_rate
+        # Deterministik/statik + baseline
         extra = ["baseline_rate", "hour","dow","month","is_weekend"]
         if "is_holiday" in tr.columns: extra.append("is_holiday")
-        if "season" in tr.columns:     extra.append("season")  # kategorik ise kullanılmayacak
-        # season text ise atlanır; numeric değilse pick_features dışlar.
 
         Xtr, ytr, cols = pick_features(tr, label_col, extra_num_cols=extra)
         Xva, yva, _    = pick_features(va, label_col, extra_num_cols=extra)
-        feat_used = cols  # son fold'un kolonlarını referans alacağız (aynı kalmalı)
 
-        # 4) Lojistik regresyon (basit, açıklanabilir)
+        # LR
         lr = LogisticRegression(max_iter=1000, solver="lbfgs", random_state=rs)
         lr.fit(Xtr, ytr)
 
-        # 5) Valid tahmini (OOF)
+        # Valid tahminleri (OOF raw)
         p_va = lr.predict_proba(Xva)[:, 1].astype("float32")
-        oof_prob[va_idx] = p_va
+        oof_prob_raw[va_idx] = p_va
 
-        # 6) Fold metrikleri
+        # Fold metrikleri (raw)
         ap  = pr_auc(yva.values, p_va)
         roc = float(roc_auc_score(yva.values, p_va))
-        fold_recs.append({"fold": fi, "pr_auc": ap, "roc_auc": roc})
+        fold_recs.append({"fold": fi, "pr_auc_raw": ap, "roc_auc_raw": roc})
 
-    # Kalibrasyon (isotonic) — OOF üzerinde
-    cal = CalibratedClassifierCV(base_estimator=LogisticRegression(max_iter=1000, solver="lbfgs", random_state=rs),
-                                 method="isotonic", cv="prefit")
-    # Not: isotonic için bir base model lazım; pratikte kalibratörü, OOF prob'ları ile fit edebilmek için,
-    # logistic'i prefit saymak yerine, isotonic'i doğrudan 'y=oof_prob' üzerinden uyarlamak isterdik.
-    # sklearn kısıtı nedeniyle şu yöntemi uygulayacağız:
-    #   - meta gibi davranıp 'cal'ı probs üstünde fit etmek için küçük bir hile: 1 özellikli LR fit + isotonic.
-    # Daha temiz bir yol: net isotonic uygulaması (sklearn.isotonic.IsotonicRegression).
-    from sklearn.isotonic import IsotonicRegression
+    # Isotonic kalibrasyon (OOF üzerinde)
     iso = IsotonicRegression(out_of_bounds="clip")
-    iso.fit(oof_prob, dfx[label_col].values.astype(int))
-    # iso nesnesini kaydedeceğiz; inference'ta lr probs → iso(probs)
+    iso.fit(oof_prob_raw, dfx[label_col].values.astype(int))
+    oof_prob_cal = iso.predict(oof_prob_raw).astype("float32")
 
-    # Precision@K ve kalibrasyon raporları (OOF)
+    # OOF metrikleri (kalibre)
+    auc_roc = float(roc_auc_score(dfx[label_col].values, oof_prob_cal))
+    ap_pr   = float(average_precision_score(dfx[label_col].values, oof_prob_cal))
+
+    # Precision@K (kalibre)
     eval_oof = pd.DataFrame({
         "datetime": dfx["datetime"].values,
         "geoid": dfx["geoid"].astype(str).values,
         "y": dfx[label_col].values.astype(int),
-        "p_raw": oof_prob
+        "p_cal": oof_prob_cal
     })
     prec_k = {}
+    tmp = eval_oof.rename(columns={"p_cal": "p_stack"})
     for k in k_list:
-        prec_k[f"P@{k}"] = precision_at_k_per_ts(eval_oof.rename(columns={"p_raw":"p_stack"}), "p_stack", k, "y")
-    cal_bins = reliability_bins(eval_oof["y"].values, oof_prob, n_bins=10)
+        prec_k[f"P@{k}"] = precision_at_k_per_ts(tmp, "p_stack", k, "y")
 
-    # Full-train ile final LR ve baseline_map üret
+    cal_bins = reliability_bins(eval_oof["y"].values, oof_prob_cal, n_bins=10)
+
+    # Full-train: final LR ve baseline_map
     baseline_map_global = build_baseline_map(dfx, label_col)
-    dfx["baseline_rate"] = attach_baseline(dfx, baseline_map_global).astype("float32")
+    global_mean_full = float(dfx[label_col].mean())
+    dfx["baseline_rate"] = attach_baseline(dfx, baseline_map_global, global_mean_full).astype("float32")
     extra = ["baseline_rate", "hour","dow","month","is_weekend"]
     if "is_holiday" in dfx.columns: extra.append("is_holiday")
     Xfull, yfull, cols_full = pick_features(dfx, label_col, extra_num_cols=extra)
@@ -301,24 +285,20 @@ def train_one_h_cat(df: pd.DataFrame, H: int, cat: str,
     tag = f"h{H}_C{cat}"
 
     joblib.dump(lr_final, os.path.join(out_models_dir, f"lr_{tag}.pkl"))
-    # IsotonicRegression objesini ayrı kaydediyoruz (kalibratör)
-    joblib.dump(iso, os.path.join(out_models_dir, f"calibrator_{tag}.pkl"))
+    joblib.dump(iso,      os.path.join(out_models_dir, f"calibrator_{tag}.pkl"))
 
-    # Feature order
     with open(os.path.join(out_models_dir, f"feature_order_{tag}.json"), "w", encoding="utf-8") as f:
         json.dump({"features": cols_full}, f, ensure_ascii=False, indent=2)
 
-    # Baseline haritasını da kaydet (inference'ta join edeceğiz)
     baseline_path = os.path.join(out_models_dir, f"baseline_map_{tag}.parquet")
     baseline_map_global.to_parquet(baseline_path, index=False)
 
-    # Metrikler
     with open(os.path.join(out_metrics_dir, f"{tag}_aucpr.json"), "w", encoding="utf-8") as f:
         json.dump({
             "horizon_h": H,
             "category": cat,
-            "oof_pr_auc": float(pr_auc(dfx[label_col].values, oof_prob)),
-            "oof_roc_auc": float(roc_auc_score(dfx[label_col].values, oof_prob)),
+            "oof_pr_auc": ap_pr,
+            "oof_roc_auc": auc_roc,
             "folds": fold_recs
         }, f, ensure_ascii=False, indent=2)
 
@@ -328,7 +308,7 @@ def train_one_h_cat(df: pd.DataFrame, H: int, cat: str,
     with open(os.path.join(out_metrics_dir, f"{tag}_calibration.json"), "w", encoding="utf-8") as f:
         json.dump({"horizon_h": H, "category": cat, **cal_bins}, f, ensure_ascii=False, indent=2)
 
-    print(f"[OK][LONG] H={H}, C={cat} | OOF PR-AUC={pr_auc(dfx[label_col].values, oof_prob):.4f} | baseline_map rows={len(baseline_map_global):,}")
+    print(f"[OK][LONG] H={H}, C={cat} | OOF (cal) PR-AUC={ap_pr:.4f} ROC-AUC={auc_roc:.4f} | baseline_map rows={len(baseline_map_global):,}")
 
 
 # -----------------------
@@ -348,14 +328,29 @@ def main():
             continue
 
         df = pd.read_parquet(path)
+
+        # Minimum kolonlar
+        required = {"geoid", "category", "datetime", "hour", "dow", "month"}
+        miss = [c for c in required if c not in df.columns]
+        if miss:
+            print(f"[Uyarı][LONG] {path} eksik kolon(lar): {miss} — atlanıyor.")
+            continue
+
+        # datetime güvenliği
+        df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce", utc=False)
+
         label_col = f"Y_label_h{H}"
         if label_col not in df.columns:
             print(f"[Uyarı][LONG] {label_col} yok ({path}), atlanıyor.")
             continue
 
-        df = df.dropna(subset=[label_col, "datetime", "geoid", "category","hour","dow","month"]).copy()
-        cats = list_categories(df)
+        # Temizlik
+        df = df.dropna(subset=[label_col, "datetime", "geoid", "category", "hour", "dow", "month"]).copy()
+        if df.empty:
+            print(f"[Uyarı][LONG] {path} temizleme sonrası boş — atlanıyor.")
+            continue
 
+        cats = list_categories(df)
         for cat in cats:
             try:
                 train_one_h_cat(
