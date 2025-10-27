@@ -1,7 +1,4 @@
 # 3_🧭_Suç_Tahmini.py
-# Tek sayfa: tarih/saat(veya gün/aralık) + kategori + GEOID filtreleriyle sonuçları listeler/grafikler.
-# ZIP/URL/yerel CSV/Parquet okuma destekli. Actions artifact (token) > Release fallback.
-
 import os
 import io
 import zipfile
@@ -14,17 +11,9 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 
-# ---------------------------
-# Sayfa ayarı
-# ---------------------------
-st.set_page_config(page_title="Suç Tahmini", page_icon="🌀", layout="wide")
-
-# ---------------------------
-# Artifact → Release fallback + token çözümleme
-# ---------------------------
 REPO_OWNER = "cem5113"
 REPO_NAME  = "crime_prediction_data"
-RELEASE_ASSET_ZIP = "fr-minimal-parquet" 
+RELEASE_ASSET_ZIP = "fr-minimal-parquet"
 
 def _resolve_token() -> str | None:
     # env > secrets sırası
