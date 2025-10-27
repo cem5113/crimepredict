@@ -100,6 +100,75 @@ def _best_zip_url() -> Tuple[str, dict]:
 # -----------------------
 # Okuyucular (ZIP/URL/yerel)
 # -----------------------
+def _read_any_table_from_bytes(raw: bytes, name_hint: str = "") -> pd.DataFrame:
+    """
+    ZIP değilse bytes'tan doğrudan parquet/csv okumayı dener.
+    name_hint uzantı ipucu verebilir ('.parquet' / '.csv').
+    """
+    bio = BytesIO(raw)
+
+    # ipucuna göre önce ilgili formatı dene
+    if name_hint.lower().endswith(".csv"):
+        try:
+            bio.seek(0); return pd.read_csv(bio)
+        except Exception:
+            pass
+    if name_hint.lower().endswith(".parquet"):
+        try:
+            bio.seek(0); return pd.read_parquet(bio)
+        except Exception:
+            pass
+
+    # ipucu yoksa: önce parquet, sonra csv
+    try:
+        bio.seek(0); return pd.read_parquet(bio)
+    except Exception:
+        bio.seek(0); return pd.read_csv(bio)
+
+def _read_table_from_zip_bytes(zip_bytes: bytes, member_path: str) -> pd.DataFrame:
+    """ZIP/inner-ZIP içinde member_path'i CSV/Parquet olarak okur; ZIP değilse doğrudan okur."""
+    # --- ÖNCE: gelen bytes ZIP mi? Değilse doğrudan parquet/csv olarak dene
+    try:
+        with zipfile.ZipFile(BytesIO(zip_bytes)) as _z:
+            pass
+    except zipfile.BadZipFile:
+        return _read_any_table_from_bytes(zip_bytes, name_hint=member_path)
+
+    # --- ZIP ise mevcut akış
+    def _read(fp, name):
+        return pd.read_csv(fp) if name.lower().endswith(".csv") else pd.read_parquet(fp)
+
+    target_base = posixpath.basename(member_path)
+    with zipfile.ZipFile(BytesIO(zip_bytes)) as z:
+        names = z.namelist()
+
+        # 1) birebir
+        if member_path in names:
+            with z.open(member_path) as f:
+                return _read(BytesIO(f.read()), member_path)
+
+        # 1.b) basename ile
+        cand = [n for n in names if n.endswith("/"+target_base) or n == target_base]
+        if cand:
+            with z.open(cand[0]) as f:
+                return _read(BytesIO(f.read()), cand[0])
+
+        # 2) iç ZIP
+        for n in names:
+            if not n.lower().endswith(".zip"):
+                continue
+            with z.open(n) as fz, zipfile.ZipFile(BytesIO(fz.read())) as z2:
+                inner = z2.namelist()
+                if member_path in inner:
+                    with z2.open(member_path) as f2:
+                        return _read(BytesIO(f2.read()), member_path)
+                cand2 = [m for m in inner if m.endswith("/"+target_base) or m == target_base]
+                if cand2:
+                    with z2.open(cand2[0]) as f2:
+                        return _read(BytesIO(f2.read()), cand2[0])
+
+    raise FileNotFoundError(f"ZIP içinde bulunamadı: {member_path}")
+
 def _read_table_from_zip_bytes(zip_bytes: bytes, member_path: str) -> pd.DataFrame:
     """ZIP/inner-ZIP içinde member_path'i CSV/Parquet olarak okur."""
     def _read(fp, name):
