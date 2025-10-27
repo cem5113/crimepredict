@@ -26,22 +26,13 @@ Girdi:
     h{H}_C{cat}_aucpr.json
     h{H}_C{cat}_precision_at_k.json
     h{H}_C{cat}_calibration.json
-
-Kullanım:
-  python scripts/03_train_mid.py \
-    --features_dir data/features/mid \
-    --out_models models/mid \
-    --out_metrics metrics/mid \
-    --horizons 96,168,336,504,720 \
-    --n_folds 3 \
-    --precision_k 20,50 \
-    --use_rf False
 """
 
 import os
 import json
 import argparse
 from typing import List, Tuple, Dict
+
 import numpy as np
 import pandas as pd
 
@@ -96,10 +87,12 @@ def pick_features(df: pd.DataFrame, label_col: str) -> Tuple[pd.DataFrame, pd.Se
     MID için özellik seçimi:
     - Kimlik/zaman/label dışındaki sayısal sütunlar
     - Objeler (string) otomatik dışlanır
-    - Gelecek sızıntısı (future/label) içeren kolon adlarını filtrele (temkinli)
+    - Gelecek sızıntısı yaratabilecek isim kalıpları elenir
     """
-    drop_like = ("timestamp", "target", "label_h", "y_label_h", "future_", "lead_", "ahead_", "horizon_")
+    leak_like = ("timestamp", "target", "label_h", "y_label_h",
+                 "future_", "lead_", "ahead_", "horizon_", "y_label", "Y_label_h")
     drop_cols = {"geoid", "category", "datetime", label_col}
+
     Xcols = []
     for c in df.columns:
         if c in drop_cols:
@@ -107,9 +100,13 @@ def pick_features(df: pd.DataFrame, label_col: str) -> Tuple[pd.DataFrame, pd.Se
         if df[c].dtype == "O":
             continue
         low = c.lower()
-        if any(tok in low for tok in drop_like):
+        if any(tok in low for tok in leak_like):
             continue
         Xcols.append(c)
+
+    if not Xcols:
+        raise ValueError("Feature listesi boş kaldı! (filtre çok agresif olabilir)")
+
     X = df[Xcols].astype("float32")
     y = df[label_col].astype(int)
     return X, y, Xcols
@@ -140,6 +137,9 @@ def pr_auc(y_true: np.ndarray, y_prob: np.ndarray) -> float:
 
 
 def precision_at_k_per_timestamp(df: pd.DataFrame, prob_col: str, k: int, label_col: str) -> float:
+    """
+    Her timestamp için olasılığa göre sıralayıp Top-K içindeki etiket oranının ortalaması.
+    """
     precs = []
     for _, g in df.groupby("datetime", sort=False):
         top = g.sort_values(prob_col, ascending=False).head(k)
@@ -153,7 +153,7 @@ def reliability_bins(y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 10) -
     edges = np.linspace(0.0, 1.0, n_bins + 1)
     out = []
     for i in range(n_bins):
-        lo, hi = edges[i], edges[i+1]
+        lo, hi = edges[i], edges[i + 1]
         if i < n_bins - 1:
             mask = (y_prob >= lo) & (y_prob < hi)
         else:
@@ -163,7 +163,8 @@ def reliability_bins(y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 10) -
             out.append({"bin": f"[{lo:.1f},{hi:.1f})", "n": 0, "prob_mean": None, "label_rate": None})
         else:
             out.append({
-                "bin": f"[{lo:.1f},{hi:.1f})", "n": n,
+                "bin": f"[{lo:.1f},{hi:.1f})",
+                "n": n,
                 "prob_mean": float(y_prob[mask].mean()),
                 "label_rate": float(y_true[mask].mean()),
             })
@@ -190,12 +191,22 @@ def train_one_horizon_category(
         print(f"[MID][H{H}][{cat}] veri yok, atlandı.")
         return
 
+    # datetime güvenliği
+    dfx["datetime"] = pd.to_datetime(dfx["datetime"], errors="coerce", utc=False)
+    dfx = dfx.dropna(subset=["datetime"])
+    if dfx.empty:
+        print(f"[MID][H{H}][{cat}] 'datetime' sonrası veri yok, atlandı.")
+        return
+
     # Özellik/etiket
     X, y, Xcols = pick_features(dfx, label_col)
     spw = compute_scale_pos_weight(y)
 
     # Zaman bazlı fold'lar
     splits = time_series_splits(dfx, n_folds)
+    if not splits:
+        print(f"[MID][H{H}][{cat}] split üretilemedi, atlanıyor.")
+        return
 
     # Base modeller
     xgb = XGBClassifier(
@@ -245,8 +256,7 @@ def train_one_horizon_category(
         ap_lgb = pr_auc(yva.values, oof.loc[va_idx, "p_lgb"].values)
         rec = {"fold": fi, "ap_xgb": ap_xgb, "ap_lgb": ap_lgb}
         if use_rf:
-            ap_rf = pr_auc(yva.values, oof.loc[va_idx, "p_rf"].values)
-            rec["ap_rf"] = ap_rf
+            rec["ap_rf"] = pr_auc(yva.values, oof.loc[va_idx, "p_rf"].values)
         fold_metrics.append(rec)
 
     # Meta model (OOF ile)
@@ -265,7 +275,6 @@ def train_one_horizon_category(
         rf.fit(X, y)
 
     # OOF meta tahmini + kalibre
-    meta_raw = meta.predict_proba(oof[meta_inputs].fillna(0.0))[:, 1]
     meta_cal = cal.predict_proba(oof[meta_inputs].fillna(0.0))[:, 1]
 
     # Metrikler (OOF)
@@ -294,7 +303,7 @@ def train_one_horizon_category(
     joblib.dump(xgb, os.path.join(out_models_dir, f"base_xgb_{tag}.pkl"))
     joblib.dump(lgb, os.path.join(out_models_dir, f"base_lgb_{tag}.pkl"))
     if use_rf:
-        joblib.dump(rf,  os.path.join(out_models_dir, f"base_rf_{tag}.pkl"))
+        joblib.dump(rf, os.path.join(out_models_dir, f"base_rf_{tag}.pkl"))
     joblib.dump(meta, os.path.join(out_models_dir, f"meta_stack_{tag}.pkl"))
     joblib.dump(cal,  os.path.join(out_models_dir, f"calibrator_{tag}.pkl"))
 
@@ -337,6 +346,17 @@ def main():
             continue
 
         df = pd.read_parquet(path)
+
+        # Minimum kolon kontrolleri
+        min_cols = {"geoid", "category", "datetime"}
+        missing = [c for c in min_cols if c not in df.columns]
+        if missing:
+            print(f"[Uyarı][MID] {path} dosyasında eksik kolon(lar): {missing} — atlanıyor.")
+            continue
+
+        # datetime güvenliği
+        df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce", utc=False)
+
         label_col = f"Y_label_h{H}"
         if label_col not in df.columns:
             print(f"[Uyarı][MID] {label_col} yok ({path}), atlanıyor.")
@@ -344,6 +364,10 @@ def main():
 
         # Temel temizlik
         df = df.dropna(subset=[label_col, "datetime", "geoid", "category"]).copy()
+        if df.empty:
+            print(f"[Uyarı][MID] {path} temizleme sonrası boş — atlanıyor.")
+            continue
+
         cats = list_categories(df)
 
         for cat in cats:
