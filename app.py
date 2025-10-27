@@ -5,11 +5,36 @@ import os
 import traceback
 import streamlit as st
 
-# ── Proje bileşenleri
-from components.utils.config import APP_NAME, APP_ROLE, DATA_REPO, DATA_BRANCH
-from components.last_update import show_last_update_badge
-from components.meta import MODEL_VERSION, MODEL_LAST_TRAIN
-from components.gh_data import raw_url, download_actions_artifact_zip, unzip
+import streamlit as st
+
+# Güvenli import: yoksa varsayılanları yükle
+try:
+    from components.config import APP_NAME, APP_ROLE, DATA_REPO, DATA_BRANCH
+except Exception as e:
+    st.warning("Config modülü bulunamadı, varsayılan ayarlar kullanılıyor.")
+    APP_NAME = "crimepredict"
+    APP_ROLE = "Kullanıcı"
+    DATA_REPO = "cem5113/crime_prediction_data"
+    DATA_BRANCH = "main"
+
+def _try_import(name, default=None):
+    try:
+        return __import__(name, fromlist=["*"])
+    except Exception as e:
+        st.info(f"Opsiyonel '{name}' modülü bulunamadı.")
+        return default
+
+_last_update = _try_import("components.last_update")
+_meta       = _try_import("components.meta")
+_gh         = _try_import("components.gh_data")
+
+# Kullanırken korumalı erişim
+show_last_update_badge = getattr(_last_update, "show_last_update_badge", lambda *a, **k: None)
+MODEL_VERSION          = getattr(_meta, "MODEL_VERSION", "v0")
+MODEL_LAST_TRAIN       = getattr(_meta, "MODEL_LAST_TRAIN", "-")
+raw_url                = getattr(_gh, "raw_url", lambda *a, **k: "")
+download_actions_artifact_zip = getattr(_gh, "download_actions_artifact_zip", lambda *a, **k: ("", {}))
+best_artifact_url      = getattr(_gh, "best_artifact_url", lambda *a, **k: ("", {}))
 
 # ── Sayfa ayarları
 st.set_page_config(page_title=APP_NAME, layout="wide")
