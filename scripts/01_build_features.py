@@ -63,7 +63,7 @@ def parse_args():
 def _resolve_artifact_zip_url(owner: str, repo: str, name_contains: str, token: str | None) -> Tuple[str | None, dict]:
     """
     Repo'daki en güncel, süresi dolmamış Actions artifact ZIP linkini döndürür.
-    name_contains: artifact adını içerir (örn: 'fr-crime-outputs-parquet').
+    name_contains: artifact adını içerir (örn: 'fr-minimal-parquet').
     """
     if not token:
         return None, {}
