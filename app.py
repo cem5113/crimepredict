@@ -113,6 +113,8 @@ with col2:
     except Exception:
         pass
 
+# ... önceki kod ...
+
 with st.expander("📦 Actions artifact indir (opsiyonel)"):
     artifact_name_input = st.text_input("Artifact adı", value="sf-crime-parquet")
     download_dir = st.text_input("İndirme klasörü", value="downloads")
@@ -125,7 +127,12 @@ with st.expander("📦 Actions artifact indir (opsiyonel)"):
                     "Artifact indirilemedi/okunamadı: GitHub token yok. "
                     "st.secrets['github_token'] ekleyin veya GITHUB_TOKEN ortam değişkenini ayarlayın."
                 )
-            zip_path = download_actions_artifact_zip(artifact_name_input, download_dir)
+
+            # 🔧 ÖNEMLİ: iki değeri ayır
+            zip_path, _meta_info = download_actions_artifact_zip(artifact_name_input, download_dir)
+            if not isinstance(zip_path, str) or not zip_path:
+                raise RuntimeError(f"Geçersiz zip_path döndü: {zip_path!r}")
+
             out_dir = unzip(zip_path, extract_dir)
             st.success(f"✅ İndirildi ve açıldı: {out_dir}")
         except Exception as e:
