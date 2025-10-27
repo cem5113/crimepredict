@@ -2,40 +2,38 @@
 # -*- coding: utf-8 -*-
 """
 01_build_features.py
-- Ham olay verisini (event-level) alır (ZIP/URL/yerel destekli)
-- Saatlik panele (geoid × category × hourly) çevirir
-- Leakage’siz lag/rolling özellikleri üretir
-- SHORT / MID / LONG horizon setleri için etiketleri (Y_label_shifted) oluşturur
-- Parquet çıktıları: data/features/{short,mid,long}/features_h{H}.parquet
-- Ayrıca tekleştirilmiş bir "features_index.parquet" (manifest) yazar
+- ZIP/URL/yerel okur (Actions artifact veya Release)
+- İç içe ZIP yapılarını otomatik açar
+- Saatlik panel + rolling/lag + horizon etiketleri üretir
 """
 
-import os, sys, argparse, zipfile, requests
+import os, sys, argparse, zipfile, requests, posixpath
 from io import BytesIO
 from typing import List, Tuple, Dict
 import numpy as np
 import pandas as pd
 
 # -----------------------
-# Konfig (istersen CLI ile override)
+# Konfig
 # -----------------------
-# Not: Yerel dosya kullanacaksan --input ile override et.
 REPO_OWNER = "cem5113"
 REPO_NAME  = "crime_prediction_data"
-ASSET_ZIP  = "fr-crime-outputs-parquet.zip"
-LATEST_ZIP_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/latest/download/{ASSET_ZIP}"
 
-# Varsayılan girdi: Release ZIP içindeki fr_crime_09.parquet
-DEFAULT_INPUT = f"urlzip::{LATEST_ZIP_URL}::fr_crime_09.parquet"   # veya CSV/parquet/zip için --input ile değiştir
+# Release fallback (varsa)
+RELEASE_ASSET_ZIP = "fr-crime-outputs-parquet.zip"
+
+# Varsayılan girdi: Kaynağı OTOMATİK seç (artifact -> release)
+# ve içinden fr_crime_09.parquet'ı oku
+DEFAULT_INPUT = "urlzip::AUTO::fr_crime_09.parquet"
 OUTPUT_DIR    = "data/features"
 
 # Horizon tanımları (saat)
 SHORT_H = [1, 2, 3, 6, 12, 24, 48, 72]
-MID_H   = [96, 168, 336, 504, 720]               # ~4g, 7g, 14g, 21g, 30g
-LONG_H  = [960, 1440, 2160]                      # ~40g, 60g, 90g (örnek)
+MID_H   = [96, 168, 336, 504, 720]
+LONG_H  = [960, 1440, 2160]
 
 # Rolling pencereler (saat)
-ROLL_WINDOWS = [1, 3, 6, 12, 24, 48, 72, 168]    # 1h..7d
+ROLL_WINDOWS = [1, 3, 6, 12, 24, 48, 72, 168]
 
 
 def parse_args():
@@ -48,7 +46,7 @@ def parse_args():
             "Ham veri yolu (parquet/csv) veya ZIP spec.\n"
             "Ör: /path/to/sf_crime_full.parquet\n"
             "Ör: zip::/path/to/fr-crime-outputs-parquet.zip::fr_crime_09.parquet\n"
-            f"Ör: urlzip::{LATEST_ZIP_URL}::fr_crime_09.parquet"
+            "Ör: urlzip::AUTO::fr_crime_09.parquet   (artifact->release otomatik)"
         ),
     )
     ap.add_argument("--outdir", type=str, default=OUTPUT_DIR, help="Çıktı klasörü")
@@ -60,26 +58,86 @@ def parse_args():
 
 
 # -----------------------
+# Artifact/Release kaynak seçici
+# -----------------------
+def _resolve_artifact_zip_url(owner: str, repo: str, name_contains: str, token: str | None) -> Tuple[str | None, dict]:
+    """
+    Repo'daki en güncel, süresi dolmamış Actions artifact ZIP linkini döndürür.
+    name_contains: artifact adını içerir (örn: 'fr-crime-outputs-parquet').
+    """
+    if not token:
+        return None, {}
+    base = f"https://api.github.com/repos/{owner}/{repo}"
+    r = requests.get(
+        f"{base}/actions/artifacts?per_page=100",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+        timeout=60,
+    )
+    r.raise_for_status()
+    arts = r.json().get("artifacts", []) or []
+    arts = [a for a in arts if (name_contains in a.get("name","")) and not a.get("expired")]
+    if not arts:
+        return None, {}
+    art = sorted(arts, key=lambda a: a.get("created_at",""), reverse=True)[0]
+    zip_url = f"{base}/actions/artifacts/{art['id']}/zip"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+    return zip_url, headers
+
+def _best_zip_url() -> Tuple[str, dict]:
+    """
+    1) Actions artifact (token varsa)
+    2) Release fallback (yoksa)
+    """
+    token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN") or os.getenv("github_token")
+    url, headers = _resolve_artifact_zip_url(REPO_OWNER, REPO_NAME, "fr-crime-outputs-parquet", token)
+    if url:
+        return url, headers
+    # Release fallback
+    rel = f"https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/latest/download/{RELEASE_ASSET_ZIP}"
+    return rel, {}
+
+
+# -----------------------
 # Okuyucular (ZIP/URL/yerel)
 # -----------------------
 def _read_parquet_from_zip_bytes(zip_bytes: bytes, member_path: str) -> pd.DataFrame:
     """
     ZIP içinden member_path'i Parquet olarak okur.
-    Eğer doğrudan bulunamazsa, ZIP içindeki 'fr_parquet_outputs.zip' içinde de arar.
+    - Doğrudan eşleşme
+    - Aynı dosya adını (basename) klasör içinde bulma
+    - İç ZIP'leri (.zip) tarama (ör. fr_parquet_outputs.zip)
+    - artifact/ klasörü altını destekler
     """
+    target_base = posixpath.basename(member_path)
+
     with zipfile.ZipFile(BytesIO(zip_bytes)) as z:
-        names = set(z.namelist())
-        # 1) Doğrudan arama
+        names = z.namelist()
+
+        # 1) Birebir
         if member_path in names:
             with z.open(member_path) as f:
                 return pd.read_parquet(BytesIO(f.read()))
-        # 2) İç ZIP: fr_parquet_outputs.zip
-        nested = [n for n in names if n.endswith("fr_parquet_outputs.zip")]
-        for n in nested:
+
+        # 1.b) Basename ile eşleşen ilk dosya
+        cand = [n for n in names if n.endswith("/"+target_base) or n == target_base]
+        if cand:
+            with z.open(cand[0]) as f:
+                return pd.read_parquet(BytesIO(f.read()))
+
+        # 2) İç ZIP'leri tara
+        for n in names:
+            if not n.lower().endswith(".zip"):
+                continue
             with z.open(n) as fz, zipfile.ZipFile(BytesIO(fz.read())) as z2:
-                if member_path in z2.namelist():
+                inner = z2.namelist()
+                if member_path in inner:
                     with z2.open(member_path) as f2:
                         return pd.read_parquet(BytesIO(f2.read()))
+                cand2 = [m for m in inner if m.endswith("/"+target_base) or m == target_base]
+                if cand2:
+                    with z2.open(cand2[0]) as f2:
+                        return pd.read_parquet(BytesIO(f2.read()))
+
     raise FileNotFoundError(f"ZIP içinde bulunamadı: {member_path}")
 
 def _read_input(path: str) -> pd.DataFrame:
@@ -88,11 +146,16 @@ def _read_input(path: str) -> pd.DataFrame:
       - Düz parquet: /path/file.parquet
       - CSV:         /path/file.csv
       - Yerel ZIP:   zip::/path/file.zip::fr_crime_09.parquet
-      - URL ZIP:     urlzip::https://.../fr-crime-outputs-parquet.zip::fr_crime_09.parquet
+      - URL ZIP:     urlzip::AUTO::fr_crime_09.parquet  (veya doğrudan urlzip::<URL>::<member>)
     """
     if path.startswith("urlzip::"):
         url, member = path[len("urlzip::"):].split("::", 1)
-        r = requests.get(url, timeout=120)
+
+        headers = {}
+        if url == "AUTO":
+            url, headers = _best_zip_url()
+
+        r = requests.get(url, headers=headers, timeout=120, allow_redirects=True)
         r.raise_for_status()
         return _read_parquet_from_zip_bytes(r.content, member)
 
@@ -117,11 +180,12 @@ def _read_input(path: str) -> pd.DataFrame:
 # Yardımcılar
 # -----------------------
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    # Temel kolonlar için isim normalizasyonu
     lower = {c.lower(): c for c in df.columns}
 
     # datetime alanını adlandır
-    if "datetime" not in lower:
+    if "datetime" not in df.columns and "datetime" in lower:
+        df = df.rename(columns={lower["datetime"]: "datetime"})
+    if "datetime" not in df.columns:
         for cand in ["received_time", "timestamp", "event_time", "date_time"]:
             if cand in df.columns:
                 df = df.rename(columns={cand: "datetime"})
@@ -131,28 +195,23 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     if "geoid" not in df.columns and "GEOID" in df.columns:
         df = df.rename(columns={"GEOID": "geoid"})
 
-    # kategori yoksa "Genel"
     if "category" not in df.columns:
         df["category"] = "Genel"
 
-    # datetime parse
     if "datetime" not in df.columns:
         raise ValueError("Girdi verisinde datetime/timestamp alanı bulunamadı.")
     df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce", utc=False)
     df = df.dropna(subset=["datetime"])
 
-    # Y_label adlandırma
     if "Y_label" not in df.columns and "y_label" in df.columns:
         df = df.rename(columns={"y_label": "Y_label"})
 
-    # tipler
     df["geoid"] = df["geoid"].astype(str)
     df["category"] = df["category"].astype(str)
     return df
 
 
 def _ensure_base_flags(df: pd.DataFrame) -> pd.DataFrame:
-    # Zaman türevleri (mevcut yoksa üret)
     if "hour" not in df.columns:
         df["hour"] = df["datetime"].dt.hour.astype("int16")
     if "day_of_week_x" in df.columns:
@@ -167,23 +226,18 @@ def _ensure_base_flags(df: pd.DataFrame) -> pd.DataFrame:
     if "is_weekend" not in df.columns:
         df["is_weekend"] = df["dow"].isin([5, 6]).astype("int8")
     if "is_holiday" not in df.columns:
-        df["is_holiday"] = 0  # ileride resmi takvimle güncellenebilir
+        df["is_holiday"] = 0
     if "is_business_hour" not in df.columns:
         df["is_business_hour"] = df["hour"].between(9, 18).astype("int8")
     if "is_night" not in df.columns:
         df["is_night"] = (~df["is_business_hour"].astype(bool)).astype("int8")
 
-    # Season
     if "season_x" in df.columns:
         df["season"] = df["season_x"].astype(str)
     else:
         m = df["month"]
         season = np.select(
-            [
-                m.isin([12, 1, 2]),
-                m.isin([3, 4, 5]),
-                m.isin([6, 7, 8]),
-            ],
+            [m.isin([12, 1, 2]), m.isin([3, 4, 5]), m.isin([6, 7, 8])],
             ["DJF", "MAM", "JJA"],
             default="SON",
         )
@@ -192,12 +246,6 @@ def _ensure_base_flags(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _to_hourly_panel(df: pd.DataFrame, freq: str = "1H") -> pd.DataFrame:
-    """
-    Olay tablosunu saatlik panele çevirir:
-    - gruplama anahtarı: geoid × category
-    - her saat için event_count ve (varsa) Y_label_count oluşturur
-    Not: Y_label zaten 0/1 ise sum(count) == event_count olur.
-    """
     keys = ["geoid", "category"]
     df["_ones"] = 1
 
@@ -232,10 +280,6 @@ def _to_hourly_panel(df: pd.DataFrame, freq: str = "1H") -> pd.DataFrame:
 
 
 def _add_rollings(panel: pd.DataFrame, windows: List[int]) -> pd.DataFrame:
-    """
-    Her geoid×category için saatlik panel üzerinde rolling/lag üretir.
-    Leakage yok: rolling pencereler 'closed=left' ve shift uygulanır.
-    """
     panel = panel.sort_values(["geoid", "category", "datetime"]).reset_index(drop=True)
     g = panel.groupby(["geoid", "category"], group_keys=False)
 
@@ -260,9 +304,6 @@ def _add_rollings(panel: pd.DataFrame, windows: List[int]) -> pd.DataFrame:
 
 
 def _make_labels_for_horizons(panel: pd.DataFrame, horizons: List[int]) -> Dict[int, pd.DataFrame]:
-    """
-    Y_label_h(t) = 1{ t .. t+h-1 saatleri arasında en az 1 olay var }
-    """
     out = {}
     base = panel.sort_values(["geoid", "category", "datetime"]).reset_index(drop=True)
     g = base.groupby(["geoid", "category"], group_keys=False)
