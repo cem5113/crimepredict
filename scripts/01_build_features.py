@@ -45,7 +45,7 @@ def parse_args():
         help=(
             "Ham veri yolu (parquet/csv) veya ZIP spec.\n"
             "Ör: /path/to/sf_crime_full.parquet\n"
-            "Ör: zip::/path/to/fr-crime-outputs-parquet.zip::fr_crime_09.parquet\n"
+            "Ör: zip::/path/to/fr-minimal-parquet.zip::fr_crime_09.parquet\n"
             "Ör: urlzip::AUTO::fr_crime_09.parquet   (artifact->release otomatik)"
         ),
     )
@@ -85,17 +85,24 @@ def _resolve_artifact_zip_url(owner: str, repo: str, name_contains: str, token: 
 
 def _best_zip_url() -> Tuple[str, dict]:
     """
-    1) Actions artifact (token varsa)
+    1) Actions artifact (token varsa) -> önce fr-minimal-parquet, sonra eski ad
     2) Release fallback (yoksa)
     """
     token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN") or os.getenv("github_token")
+
+    # Yeni artifact adı
+    url, headers = _resolve_artifact_zip_url(REPO_OWNER, REPO_NAME, "fr-minimal-parquet", token)
+    if url:
+        return url, headers
+
+    # Eski ad yedek
     url, headers = _resolve_artifact_zip_url(REPO_OWNER, REPO_NAME, "fr-crime-outputs-parquet", token)
     if url:
         return url, headers
-    # Release fallback
+
+    # Release fallback (yalnız Release asset yayınlıyorsan işe yarar)
     rel = f"https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/latest/download/{RELEASE_ASSET_ZIP}"
     return rel, {}
-
 
 # -----------------------
 # Okuyucular (ZIP/URL/yerel)
@@ -127,14 +134,13 @@ def _read_any_table_from_bytes(raw: bytes, name_hint: str = "") -> pd.DataFrame:
 
 def _read_table_from_zip_bytes(zip_bytes: bytes, member_path: str) -> pd.DataFrame:
     """ZIP/inner-ZIP içinde member_path'i CSV/Parquet olarak okur; ZIP değilse doğrudan okur."""
-    # --- ÖNCE: gelen bytes ZIP mi? Değilse doğrudan parquet/csv olarak dene
+    # ZIP değilse: bytes'ı parquet/csv olarak dene
     try:
         with zipfile.ZipFile(BytesIO(zip_bytes)) as _z:
             pass
     except zipfile.BadZipFile:
         return _read_any_table_from_bytes(zip_bytes, name_hint=member_path)
 
-    # --- ZIP ise mevcut akış
     def _read(fp, name):
         return pd.read_csv(fp) if name.lower().endswith(".csv") else pd.read_parquet(fp)
 
