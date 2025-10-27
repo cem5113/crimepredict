@@ -67,7 +67,7 @@ def _best_zip_url():
     if url:
         return url, headers
     # eski ad(lar) yedek
-    url, headers = _resolve_artifact_zip_url(REPO_OWNER, REPO_NAME, "fr-crime-outputs-parquet")
+    url, headers = _resolve_artifact_zip_url(REPO_OWNER, REPO_NAME, "fr-minimal-parquet")
     if url:
         return url, headers
     rel = f"https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/latest/download/{RELEASE_ASSET_ZIP}"
