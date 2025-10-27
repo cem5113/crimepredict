@@ -1,14 +1,17 @@
-# pages/2_🗺️_Risk_Haritası.py
+# pages/2_🗺️_Risk_Haritası.py — Düzeltilmiş
+
 import io, os, json, zipfile
 from datetime import date
 import pandas as pd
 import streamlit as st
 import pydeck as pdk
 import requests
+
 from components.last_update import show_last_update_badge
 from components.meta import MODEL_VERSION, MODEL_LAST_TRAIN
 
-st.set_page_config(page_title="🗺️ Risk Haritası (Günlük)", layout="wide")
+# NOT: st.set_page_config(...) sadece app.py'de olmalı — buradan kaldırıldı.
+
 st.title("🕒 Anlık Suç Risk Haritası")
 st.markdown(
     "<p style='font-size:14px; font-style:italic;'>Bu harita, en güncel veriler üzerinden her GEOID bazında 24 saat içerisinde suç gerçekleşme olasılıklarını göstermektedir. Harita, model tarafından son güncellenen tahmin skorları üzerinden oluşturulmuştur. Gerçek suç verileriyle birebir eşleşmeyebilir.</p>",
