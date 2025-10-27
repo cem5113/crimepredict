@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-# 1) Streamlit'i import et ve İLK iş olarak sayfa config'i ayarla
+# 1) Streamlit'i import et ve İLK iş olarak sayfa config'ini ayarla
 import streamlit as st
 st.set_page_config(page_title="crimepredict", layout="wide", page_icon="🛰️")
 
-# 2) Diğer importlar (st.* çağrısı yapmamalılar)
+# 2) Diğer importlar (import aşamasında st.* çağrısı OLMAMALI)
 import os
 import traceback
 
@@ -16,13 +16,13 @@ try:
     from components.config import APP_NAME, APP_ROLE, DATA_REPO, DATA_BRANCH
 except Exception:
     _config_missing = True
-    APP_NAME   = "crimepredict"
-    APP_ROLE   = "Kullanıcı"
-    DATA_REPO  = "cem5113/crime_prediction_data"
-    DATA_BRANCH= "main"
+    APP_NAME    = "crimepredict"
+    APP_ROLE    = "Kullanıcı"
+    DATA_REPO   = "cem5113/crime_prediction_data"
+    DATA_BRANCH = "main"
 
-# 4) Opsiyonel modüller — artık UI çağrısı yapılabilir
-def _try_import(name, default=None):
+# 4) Opsiyonel modüller — artık UI çağrısı yapılabilir (set_page_config sonrası)
+def _try_import(name: str, default=None):
     try:
         return __import__(name, fromlist=["*"])
     except Exception:
@@ -33,13 +33,13 @@ _last_update = _try_import("components.last_update")
 _meta        = _try_import("components.meta")
 _gh          = _try_import("components.gh_data")
 
-# 5) Güvenli erişimler
-show_last_update_badge = getattr(_last_update, "show_last_update_badge", lambda *a, **k: None)
-MODEL_VERSION          = getattr(_meta, "MODEL_VERSION", "v0")
-MODEL_LAST_TRAIN       = getattr(_meta, "MODEL_LAST_TRAIN", "-")
-raw_url                = getattr(_gh, "raw_url", lambda *a, **k: "")
-download_actions_artifact_zip = getattr(_gh, "download_actions_artifact_zip", lambda *a, **k: ("", {}))
-best_artifact_url      = getattr(_gh, "best_artifact_url", lambda *a, **k: ("", {}))
+# 5) Güvenli erişimler (yoksa no-op / varsayılanlar)
+show_last_update_badge          = getattr(_last_update, "show_last_update_badge", lambda *a, **k: None)
+MODEL_VERSION: str              = getattr(_meta, "MODEL_VERSION", "v0")
+MODEL_LAST_TRAIN: str           = getattr(_meta, "MODEL_LAST_TRAIN", "-")
+raw_url                         = getattr(_gh, "raw_url", lambda *a, **k: "")
+download_actions_artifact_zip   = getattr(_gh, "download_actions_artifact_zip", lambda *a, **k: ("", {}))
+best_artifact_url               = getattr(_gh, "best_artifact_url", lambda *a, **k: ("", {}))
 
 # 6) Yardımcı: unzip (eski kodda tanımlı değildi → NameError oluyordu)
 def unzip(zip_path: str, out_dir: str) -> str:
