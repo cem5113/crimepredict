@@ -20,7 +20,7 @@ REPO_OWNER = "cem5113"
 REPO_NAME  = "crime_prediction_data"
 
 # Release fallback (varsa)
-RELEASE_ASSET_ZIP = "fr-minimal-parquet"
+RELEASE_ASSET_ZIP = "fr-minimal-parquet.zip"
 
 # Varsayılan girdi: Kaynağı OTOMATİK seç (artifact -> release)
 # ve içinden fr_crime_09.parquet'ı oku
@@ -173,41 +173,6 @@ def _read_table_from_zip_bytes(zip_bytes: bytes, member_path: str) -> pd.DataFra
                     with z2.open(cand2[0]) as f2:
                         return _read(BytesIO(f2.read()), cand2[0])
 
-    raise FileNotFoundError(f"ZIP içinde bulunamadı: {member_path}")
-
-def _read_table_from_zip_bytes(zip_bytes: bytes, member_path: str) -> pd.DataFrame:
-    """ZIP/inner-ZIP içinde member_path'i CSV/Parquet olarak okur."""
-    def _read(fp, name):
-        return pd.read_csv(fp) if name.lower().endswith(".csv") else pd.read_parquet(fp)
-
-    target_base = posixpath.basename(member_path)
-    with zipfile.ZipFile(BytesIO(zip_bytes)) as z:
-        names = z.namelist()
-
-        # 1) birebir
-        if member_path in names:
-            with z.open(member_path) as f:
-                return _read(BytesIO(f.read()), member_path)
-
-        # 1.b) basename ile
-        cand = [n for n in names if n.endswith("/"+target_base) or n == target_base]
-        if cand:
-            with z.open(cand[0]) as f:
-                return _read(BytesIO(f.read()), cand[0])
-
-        # 2) iç ZIP
-        for n in names:
-            if not n.lower().endswith(".zip"):
-                continue
-            with z.open(n) as fz, zipfile.ZipFile(BytesIO(fz.read())) as z2:
-                inner = z2.namelist()
-                if member_path in inner:
-                    with z2.open(member_path) as f2:
-                        return _read(BytesIO(f2.read()), member_path)
-                cand2 = [m for m in inner if m.endswith("/"+target_base) or m == target_base]
-                if cand2:
-                    with z2.open(cand2[0]) as f2:
-                        return _read(BytesIO(f2.read()), cand2[0])
     raise FileNotFoundError(f"ZIP içinde bulunamadı: {member_path}")
     
 def _read_input(path: str) -> pd.DataFrame:
