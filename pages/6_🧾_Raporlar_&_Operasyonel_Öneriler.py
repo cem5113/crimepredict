@@ -1,20 +1,34 @@
-# pages/6_🧾_Raporlar_&_Operasyonel_Öneriler.py 
+# pages/6_🧾_Raporlar_&_Operasyonel_Öneriler.py — revize
+
+# 0) path-fix
+import os, sys
+ROOT = os.path.dirname(os.path.dirname(__file__))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 
 import streamlit as st
-from ui.tab_reports import render_reports  # ui/tab_reports.py
 
-from components.last_update import show_last_update_badge
-from components.meta import MODEL_VERSION, MODEL_LAST_TRAIN
+# 1) Güvenli importlar
+try:
+    from ui.tab_reports import render_reports  # ui/tab_reports.py
+except Exception as e:
+    render_reports = None
+    st.error("`ui.tab_reports` modülü bulunamadı.")
+    st.caption(f"Ayrıntı: {e}")
 
-# NOT: st.set_page_config(...) sadece app.py'de olacak, buradan kaldırıldı.
+try:
+    from components.last_update import show_last_update_badge
+    from components.meta import MODEL_VERSION, MODEL_LAST_TRAIN
+except Exception:
+    def show_last_update_badge(*a, **k): ...
+    MODEL_VERSION, MODEL_LAST_TRAIN = "v0", "-"
 
-# Sayfa başlığı
+# 2) Sayfa gövdesi
 st.title("🧾 Raporlar & Operasyonel Öneriler")
 
-# Rapor sekmesi içeriğini oluştur
-render_reports()
+if render_reports:
+    render_reports()
 
-# Model sürümü ve son eğitim bilgisi
 show_last_update_badge(
     data_upto=None,
     model_version=MODEL_VERSION,
