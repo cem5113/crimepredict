@@ -1,10 +1,11 @@
 # 3_🧭_Suç_Tahmini.py
 # Tek sayfa: tarih/saat(veya gün/aralık) + kategori + GEOID filtreleriyle sonuçları listeler/grafikler.
-# ZIP/URL/yerel parquet okuma destekli.
+# ZIP/URL/yerel parquet okuma destekli. Actions artifact (token) > Release fallback.
 
 import os
 import io
 import zipfile
+import posixpath
 from io import BytesIO
 from datetime import datetime, timedelta
 
@@ -23,28 +24,84 @@ st.set_page_config(
 )
 
 # ---------------------------
+# Kaynak çözümleyici: Actions artifact -> Release fallback
+# ---------------------------
+REPO_OWNER = "cem5113"
+REPO_NAME  = "crime_prediction_data"
+RELEASE_ASSET_ZIP = "fr-crime-outputs-parquet.zip"  # varsa release asset adı
+
+def _resolve_artifact_zip_url(owner: str, repo: str, name_contains: str, token: str | None):
+    """Repo'daki en güncel, süresi dolmamış artifact ZIP linkini döndürür (URL, headers)."""
+    if not token:
+        return None, {}
+    base = f"https://api.github.com/repos/{owner}/{repo}"
+    r = requests.get(
+        f"{base}/actions/artifacts?per_page=100",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+        timeout=60,
+    )
+    r.raise_for_status()
+    arts = (r.json() or {}).get("artifacts", []) or []
+    arts = [a for a in arts if (name_contains in (a.get("name",""))) and not a.get("expired")]
+    if not arts:
+        return None, {}
+    art = sorted(arts, key=lambda a: a.get("created_at",""), reverse=True)[0]
+    zip_url = f"{base}/actions/artifacts/{art['id']}/zip"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+    return zip_url, headers
+
+def _best_zip_url():
+    """
+    1) Actions artifact (token varsa)
+    2) Release fallback (yoksa)
+    """
+    token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN") or os.getenv("github_token")
+    url, headers = _resolve_artifact_zip_url(REPO_OWNER, REPO_NAME, "fr-crime-outputs-parquet", token)
+    if url:
+        return url, headers
+    rel = f"https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/latest/download/{RELEASE_ASSET_ZIP}"
+    return rel, {}
+
+# ---------------------------
 # ZIP/URL/yerel akıllı okuyucu
 # ---------------------------
 def _read_parquet_from_zip_bytes(zip_bytes: bytes, member_path: str) -> pd.DataFrame:
     """
     Bir ZIP'in içindeki 'member_path'i Parquet olarak okur.
-    Eğer doğrudan bulamazsa, ZIP içindeki 'fr_parquet_outputs.zip' içinde de arar.
+    - Doğrudan eşleşme
+    - Basename ile klasör içinden bulma
+    - İç ZIP'lerde (.zip) arama (ör. fr_parquet_outputs.zip)
+    - artifact/ altını destekler
     """
+    target_base = posixpath.basename(member_path)
+
     with zipfile.ZipFile(BytesIO(zip_bytes)) as z:
-        names = set(z.namelist())
+        names = z.namelist()
 
         # 1) Doğrudan arama
         if member_path in names:
             with z.open(member_path) as f:
                 return pd.read_parquet(BytesIO(f.read()))
 
-        # 2) İç ZIP: fr_parquet_outputs.zip
-        nested_cands = [n for n in names if n.endswith("fr_parquet_outputs.zip")]
-        for nested in nested_cands:
+        # 1.b) Basename ile eşleşen ilk dosya (klasör farketmez)
+        cand = [n for n in names if n.endswith("/"+target_base) or n == target_base]
+        if cand:
+            with z.open(cand[0]) as f:
+                return pd.read_parquet(BytesIO(f.read()))
+
+        # 2) İç ZIP'ler
+        for nested in names:
+            if not nested.lower().endswith(".zip"):
+                continue
             with z.open(nested) as fz:
                 with zipfile.ZipFile(BytesIO(fz.read())) as z2:
-                    if member_path in z2.namelist():
+                    inner = z2.namelist()
+                    if member_path in inner:
                         with z2.open(member_path) as f2:
+                            return pd.read_parquet(BytesIO(f2.read()))
+                    cand2 = [m for m in inner if m.endswith("/"+target_base) or m == target_base]
+                    if cand2:
+                        with z2.open(cand2[0]) as f2:
                             return pd.read_parquet(BytesIO(f2.read()))
 
     raise FileNotFoundError(f"ZIP içinde bulunamadı: {member_path}")
@@ -54,21 +111,25 @@ def read_parquet_smart(spec: str) -> pd.DataFrame:
     spec biçimleri:
       - Yerel parquet:        /path/to/file.parquet
       - Yerel zip içi:        zip::/path/to/file.zip::artifact/risk_hourly.parquet
-      - URL zip içi:          urlzip::https://.../fr-crime-outputs-parquet.zip::artifact/risk_hourly.parquet
-      - URL iç ZIP’in içi:    urlzip::https://.../fr-crime-outputs-parquet.zip::fr_crime_09.parquet
-                               (bulamazsa otomatik fr_parquet_outputs.zip içinde de arar)
+      - URL zip içi:          urlzip::<URL veya AUTO>::artifact/risk_hourly.parquet
+      - URL iç ZIP’in içi:    urlzip::<URL veya AUTO>::fr_crime_09.parquet  (iç ZIP de taranır)
     """
     if spec.startswith("urlzip::"):
         url, member = spec[len("urlzip::"):].split("::", 1)
-        r = requests.get(url, timeout=90)
+        headers = {}
+        if url == "AUTO":  # artifact->release otomatik
+            url, headers = _best_zip_url()
+        r = requests.get(url, headers=headers, timeout=120, allow_redirects=True)
         r.raise_for_status()
         return _read_parquet_from_zip_bytes(r.content, member)
+
     elif spec.startswith("zip::"):
         zip_path, member = spec[len("zip::"):].split("::", 1)
         if not os.path.exists(zip_path):
             raise FileNotFoundError(f"ZIP yok: {zip_path}")
         with open(zip_path, "rb") as f:
             return _read_parquet_from_zip_bytes(f.read(), member)
+
     else:
         # düz parquet
         if not os.path.exists(spec):
@@ -83,14 +144,12 @@ def load_hourly(path: str) -> pd.DataFrame:
     df = read_parquet_smart(path)
     # Beklenen kolonlar: timestamp, geoid, category, p_stack
     if "timestamp" not in df.columns:
-        # Bazı setlerde 'datetime' olabilir; normalize edelim
         if "datetime" in df.columns:
             df = df.rename(columns={"datetime": "timestamp"})
         else:
             raise ValueError("Saatlik tabloda 'timestamp' ya da 'datetime' kolonu yok.")
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=False)
 
-    # tipler
     if "geoid" not in df.columns and "GEOID" in df.columns:
         df = df.rename(columns={"GEOID": "geoid"})
     df["geoid"] = df["geoid"].astype(str)
@@ -111,13 +170,8 @@ def load_daily(path: str) -> pd.DataFrame | None:
     except Exception:
         return None
 
-    # 'date' yoksa, varsa 'timestamp/datetime' üzerinden üretmeyi dene
     if "date" not in df.columns:
-        ts_col = None
-        if "timestamp" in df.columns:
-            ts_col = "timestamp"
-        elif "datetime" in df.columns:
-            ts_col = "datetime"
+        ts_col = "timestamp" if "timestamp" in df.columns else ("datetime" if "datetime" in df.columns else None)
         if ts_col is not None:
             dt = pd.to_datetime(df[ts_col], errors="coerce", utc=False)
             if dt.notna().any():
@@ -155,19 +209,13 @@ def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
     return buf.getvalue().encode("utf-8")
 
 # ---------------------------
-# Varsayılan yollar (GitHub Releases)
+# Varsayılan yollar (AUTO: artifact -> release)
 # ---------------------------
-REPO_OWNER = "cem5113"
-REPO_NAME  = "crime_prediction_data"
-ASSET_ZIP  = "fr-crime-outputs-parquet.zip"
-LATEST_ZIP_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/latest/download/{ASSET_ZIP}"
-
 # Saatlik skorlar (artifact/risk_hourly.parquet)
-DEFAULT_HOURLY = f"urlzip::{LATEST_ZIP_URL}::artifact/risk_hourly.parquet"
+DEFAULT_HOURLY = "urlzip::AUTO::artifact/risk_hourly.parquet"
 
 # Opsiyonel günlük/özet – en zengin tablo (fr_crime_09.parquet)
-# Not: Bu dosya çoğu zaman iç ZIP'te; okuyucu otomatik olarak iç ZIP'i de tarar.
-DEFAULT_DAILY  = f"urlzip::{LATEST_ZIP_URL}::fr_crime_09.parquet"
+DEFAULT_DAILY  = "urlzip::AUTO::fr_crime_09.parquet"
 
 # ---------------------------
 # Sidebar — seçimler
@@ -179,7 +227,7 @@ hourly_path = st.sidebar.text_input(
     value=DEFAULT_HOURLY,
     help=(
         "Örnekler:\n"
-        f"- URL ZIP: urlzip::{LATEST_ZIP_URL}::artifact/risk_hourly.parquet\n"
+        "- URL ZIP (AUTO): urlzip::AUTO::artifact/risk_hourly.parquet\n"
         "- Yerel ZIP: zip::/path/to/fr-crime-outputs-parquet.zip::artifact/risk_hourly.parquet\n"
         "- Düz parquet: /path/to/risk_hourly.parquet"
     ),
@@ -189,7 +237,7 @@ daily_path  = st.sidebar.text_input(
     value=DEFAULT_DAILY,
     help=(
         "Örnekler:\n"
-        f"- URL ZIP: urlzip::{LATEST_ZIP_URL}::fr_crime_09.parquet\n"
+        "- URL ZIP (AUTO): urlzip::AUTO::fr_crime_09.parquet\n"
         "- Yerel ZIP: zip::/path/to/fr-crime-outputs-parquet.zip::fr_crime_09.parquet\n"
         "- Düz parquet: /path/to/risk_daily_by_category.parquet"
     ),
@@ -200,6 +248,9 @@ try:
     df = load_hourly(hourly_path)
 except Exception as e:
     st.error(f"Saatlik dosya okunamadı:\n\n{e}")
+    # Token yoksa kısa ipucu:
+    st.info("İpucu: Artifact için ortamda GITHUB_TOKEN/GH_TOKEN/github_token bulunmalı. "
+            "Yoksa Release fallback denenir.")
     st.stop()
 
 df_daily = load_daily(daily_path)
@@ -212,12 +263,12 @@ time_mode = st.sidebar.radio("Zaman seçimi", ["Tek saat", "Gün (24 saat)", "Ar
 ts_single = day_single = start_range = end_range = None
 if time_mode == "Tek saat":
     ts_candidates = sorted(pd.to_datetime(df["timestamp"]).unique())
-    default_idx = 0 if len(ts_candidates) else None
-    ts_single = st.sidebar.selectbox("Zaman (timestamp)", options=ts_candidates, index=default_idx)
+    default_idx = 0 if len(ts_candidates) > 0 else None
+    ts_single = st.sidebar.selectbox("Zaman (timestamp)", options=ts_candidates, index=default_idx) if len(ts_candidates) else None
 elif time_mode == "Gün (24 saat)":
     days = sorted(pd.to_datetime(df["timestamp"]).dt.date.unique())
-    default_idx = 0 if len(days) else None
-    day_single = st.sidebar.selectbox("Gün", options=days, index=default_idx)
+    default_idx = 0 if len(days) > 0 else None
+    day_single = st.sidebar.selectbox("Gün", options=days, index=default_idx) if len(days) else None
 else:
     ts_all = sorted(pd.to_datetime(df["timestamp"]).unique())
     if ts_all:
@@ -359,12 +410,14 @@ st.subheader("📅 Günlük özet (opsiyonel)")
 def _has_daily_view_cols(d: pd.DataFrame) -> bool:
     return ("date" in d.columns) and ("daily_score" in d.columns)
 
+df_daily = df_daily  # zaten yüklendi
 if df_daily is None:
     st.caption("`fr_crime_09.parquet` (veya `risk_daily_by_category.parquet`) bulunamadı/okunamadı — opsiyonel bölümdür.")
 else:
     if _has_daily_view_cols(df_daily):
         days_all = sorted(pd.to_datetime(df_daily["date"]).unique())
-        day_sel = st.selectbox("Gün seç", options=days_all, index=len(days_all)-1 if len(days_all) else 0)
+        idx = len(days_all)-1 if len(days_all) else 0
+        day_sel = st.selectbox("Gün seç", options=days_all, index=idx if len(days_all) else None)
         d1 = df_daily[pd.to_datetime(df_daily["date"]) == pd.to_datetime(day_sel)]
         if sel_cats:
             d1 = d1[d1["category"].astype(str).isin(sel_cats)]
