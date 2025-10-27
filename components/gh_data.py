@@ -3,7 +3,7 @@ from __future__ import annotations
 import io, os, zipfile, json, time
 from pathlib import Path
 from typing import Optional
-from components.config import DATA_REPO, DATA_BRANCH, RAW_BASE
+from components.utils.config import DATA_REPO, DATA_BRANCH, RAW_BASE
 import os
 import requests
 import streamlit as st
