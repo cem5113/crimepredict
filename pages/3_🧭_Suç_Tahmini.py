@@ -1,8 +1,11 @@
-# 3_🧭_Suç_Tahmini.py
+# 3_🧭_Suç_Tahmini 
+# Tam kapsamlı: saatlik (≤7 gün) ve günlük (≤365 gün) risk görünümleri
+# Not: Değişken/işlev adlarında kısaltma yok; açıklayıcı yorumlar eklendi.
+
 import os
 import io
-import zipfile
 import posixpath
+import zipfile
 from io import BytesIO
 from datetime import datetime, timedelta
 
@@ -11,509 +14,466 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 
-REPO_OWNER = "cem5113"
-REPO_NAME  = "crime_prediction_data"
-RELEASE_ASSET_ZIP = "fr-minimal-parquet"
+# ------------------------------------------------------------
+# ️⚙️ GitHub repo ve artifact bilgisi
+# ------------------------------------------------------------
+REPOSITORY_OWNER = "cem5113"
+REPOSITORY_NAME  = "crime_prediction_data"
+ARTIFACT_NAME_SHOULD_CONTAIN = "sf-crime-parquet"  # Artifact adında bu ifade geçmeli
 
-def _resolve_token() -> str | None:
-    # env > secrets sırası
+# Artifact içindeki beklenen dosya adları (üye/"member")
+ARTIFACT_MEMBER_HOURLY  = "risk_hourly_grid_full_labeled.parquet"   # parquet yoksa .csv denenir
+ARTIFACT_MEMBER_DAILY   = "risk_daily_grid_full_labeled.parquet"    # parquet yoksa .csv denenir
+
+# (Opsiyonel) GEOID → (lat, lon) eşlemesi için aday dosyalar (artifact içinde aranır)
+CENTROID_FILE_CANDIDATES = [
+    "geoid_centroids.parquet",
+    "sf_geoid_centroids.parquet",
+    "geoid_centroids.csv",
+    "sf_geoid_centroids.csv",
+    # Son çare: grid CSV (içinde lat/lon olabilir)
+    "sf_crime_grid_full_labeled.csv",
+]
+
+# ------------------------------------------------------------
+# 🔑 Token / Header
+# ------------------------------------------------------------
+def resolve_github_token() -> str | None:
+    """Önce ortam değişkeni, sonra Streamlit secrets üzerinden GitHub token getirir."""
     if os.getenv("GITHUB_TOKEN"):
         return os.getenv("GITHUB_TOKEN")
-    for k in ("github_token", "GH_TOKEN", "GITHUB_TOKEN"):
+    for key in ("github_token", "GH_TOKEN", "GITHUB_TOKEN"):
         try:
-            if k in st.secrets and st.secrets[k]:
-                os.environ["GITHUB_TOKEN"] = str(st.secrets[k])
+            if key in st.secrets and st.secrets[key]:
+                os.environ["GITHUB_TOKEN"] = str(st.secrets[key])
                 return os.environ["GITHUB_TOKEN"]
         except Exception:
             pass
     return None
 
-def _gh_headers() -> dict:
-    hdrs = {"Accept": "application/vnd.github+json"}
-    tok = os.getenv("GITHUB_TOKEN")
-    if tok:
-        hdrs["Authorization"] = f"Bearer {tok}"
-    return hdrs
+def github_api_headers() -> dict:
+    headers = {"Accept": "application/vnd.github+json"}
+    token = os.getenv("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
 
-def _resolve_artifact_zip_url(owner: str, repo: str, name_contains: str):
-    tok = _resolve_token()
-    if not tok:
+# ------------------------------------------------------------
+# 📦 Artifact ZIP alma (en güncel ve süresi dolmamış)
+# ------------------------------------------------------------
+def resolve_latest_artifact_zip_url(owner: str, repo: str, name_contains: str):
+    """Adı belirli bir deseni içeren en güncel (expired olmayan) artifact ZIP URL’sini döndürür."""
+    token = resolve_github_token()
+    if not token:
         return None, {}
     base = f"https://api.github.com/repos/{owner}/{repo}"
-    r = requests.get(f"{base}/actions/artifacts?per_page=100", headers=_gh_headers(), timeout=60)
-    r.raise_for_status()
-    arts = (r.json() or {}).get("artifacts", []) or []
-    arts = [a for a in arts if (name_contains in a.get("name","")) and not a.get("expired")]
-    if not arts:
+    response = requests.get(f"{base}/actions/artifacts?per_page=100", headers=github_api_headers(), timeout=60)
+    response.raise_for_status()
+    artifacts = (response.json() or {}).get("artifacts", []) or []
+    artifacts = [a for a in artifacts if (name_contains in a.get("name", "")) and not a.get("expired")]
+    if not artifacts:
         return None, {}
-    arts.sort(key=lambda a: a.get("updated_at",""), reverse=True)
-    url = f"{base}/actions/artifacts/{arts[0]['id']}/zip"
-    return url, _gh_headers()
+    artifacts.sort(key=lambda a: a.get("updated_at", ""), reverse=True)
+    url = f"{base}/actions/artifacts/{artifacts[0]['id']}/zip"
+    return url, github_api_headers()
 
-def _best_zip_url():
-    # önce yeni artifact adı
-    url, headers = _resolve_artifact_zip_url(REPO_OWNER, REPO_NAME, "fr-minimal-parquet")
-    if url:
-        return url, headers
-    # eski ad(lar) yedek
-    url, headers = _resolve_artifact_zip_url(REPO_OWNER, REPO_NAME, "fr-minimal-parquet")
-    if url:
-        return url, headers
-    rel = f"https://github.com/{REPO_OWNER}/{REPO_NAME}/releases/latest/download/{RELEASE_ASSET_ZIP}"
-    return rel, {}
-
-# ---------------------------
-# ZIP/URL/yerel akıllı okuyucu (CSV + Parquet, iç ZIP dahil)
-# ---------------------------
-def _read_any_table_from_bytes(raw: bytes, name_hint: str = "") -> pd.DataFrame:
-    bio = BytesIO(raw)
-    # ipucu uzantısı varsa önce onu dene
-    if name_hint.lower().endswith(".csv"):
+# ------------------------------------------------------------
+# 🧰 ZIP içinden üye okuma (parquet→csv fallback)
+# ------------------------------------------------------------
+def read_member_from_zip_bytes(zip_bytes: bytes, member_path: str) -> pd.DataFrame:
+    """ZIP içinden dosya okur; parquet bulunamazsa aynı adın .csv versiyonunu dener."""
+    def read_any_table(raw_bytes: bytes, name_hint: str) -> pd.DataFrame:
+        buffer = BytesIO(raw_bytes)
+        if name_hint.lower().endswith(".csv"):
+            return pd.read_csv(buffer)
         try:
-            bio.seek(0); return pd.read_csv(bio)
+            buffer.seek(0)
+            return pd.read_parquet(buffer)
         except Exception:
-            pass
-    if name_hint.lower().endswith(".parquet"):
-        try:
-            bio.seek(0); return pd.read_parquet(bio)
-        except Exception:
-            pass
-    # ipucu yoksa parquet -> csv sırala
-    try:
-        bio.seek(0); return pd.read_parquet(bio)
-    except Exception:
-        bio.seek(0); return pd.read_csv(bio)
+            buffer.seek(0)
+            return pd.read_csv(buffer)
 
-def _read_table_from_zip_bytes(zip_bytes: bytes, member_path: str) -> pd.DataFrame:
-    # ZIP değilse doğrudan dosya olarak dene
-    try:
-        with zipfile.ZipFile(BytesIO(zip_bytes)) as _z:
-            pass
-    except zipfile.BadZipFile:
-        return _read_any_table_from_bytes(zip_bytes, name_hint=member_path)
-        
-    def _read(fp, name):
-        if name.lower().endswith(".csv"):
-            return pd.read_csv(fp)
-        return pd.read_parquet(fp)
+    with zipfile.ZipFile(BytesIO(zip_bytes)) as zip_file:
+        zip_member_names = zip_file.namelist()
 
-    target_base = posixpath.basename(member_path)
+        # 1) Tam yol eşleşmesi
+        if member_path in zip_member_names:
+            with zip_file.open(member_path) as file_obj:
+                return read_any_table(file_obj.read(), member_path)
 
-    with zipfile.ZipFile(BytesIO(zip_bytes)) as z:
-        names = z.namelist()
+        # 2) Sadece basename ile eşleşme
+        base_name = posixpath.basename(member_path)
+        candidate_names = [n for n in zip_member_names if n.endswith("/" + base_name) or n == base_name]
+        if candidate_names:
+            with zip_file.open(candidate_names[0]) as file_obj:
+                return read_any_table(file_obj.read(), candidate_names[0])
 
-        # 1) birebir
-        if member_path in names:
-            with z.open(member_path) as f:
-                return _read(BytesIO(f.read()), member_path)
-
-        # 1.b) basename ile
-        cand = [n for n in names if n.endswith("/"+target_base) or n == target_base]
-        if cand:
-            with z.open(cand[0]) as f:
-                return _read(BytesIO(f.read()), cand[0])
-
-        # 2) iç ZIP
-        for n in names:
-            if not n.lower().endswith(".zip"):
-                continue
-            with z.open(n) as fz, zipfile.ZipFile(BytesIO(fz.read())) as z2:
-                inner = z2.namelist()
-                if member_path in inner:
-                    with z2.open(member_path) as f2:
-                        return _read(BytesIO(f2.read()), member_path)
-                cand2 = [m for m in inner if m.endswith("/"+target_base) or m == target_base]
-                if cand2:
-                    with z2.open(cand2[0]) as f2:
-                        return _read(BytesIO(f2.read()), cand2[0])
+        # 3) parquet ↔ csv fallback
+        alternative = None
+        if member_path.lower().endswith(".parquet"):
+            alternative = member_path[:-8] + ".csv"
+        elif member_path.lower().endswith(".csv"):
+            alternative = member_path[:-4] + ".parquet"
+        if alternative:
+            return read_member_from_zip_bytes(zip_bytes, alternative)
 
     raise FileNotFoundError(f"ZIP içinde bulunamadı: {member_path}")
 
-def read_table_smart(spec: str) -> pd.DataFrame:
-    """
-    spec biçimleri:
-      - Yerel dosya:         /path/to/file.parquet | .csv
-      - Yerel zip içi:       zip::/path/file.zip::artifact/risk_hourly.parquet
-      - URL zip içi:         urlzip::<URL veya AUTO>::risk_hourly.parquet
-                             (Bulunamazsa otomatik .csv versiyonunu da dener)
-    """
-    def _try(url_or_bytes, member, from_zip: bool, headers=None):
-        # Önce verilen üye, olmazsa .parquet<->.csv dönüşümü
-        try_members = [member]
-        if member.lower().endswith(".parquet"):
-            try_members.append(member[:-8] + ".csv")
-        elif member.lower().endswith(".csv"):
-            try_members.append(member[:-4] + ".parquet")
-
-        if from_zip:
-            # url
-            url = url_or_bytes
-            r = requests.get(url, headers=headers or {}, timeout=120, allow_redirects=True)
-            r.raise_for_status()
-            for m in try_members:
-                try:
-                    return _read_table_from_zip_bytes(r.content, m)
-                except FileNotFoundError:
-                    continue
-        else:
-            # local zip bytes
-            with open(url_or_bytes, "rb") as f:
-                content = f.read()
-            for m in try_members:
-                try:
-                    return _read_table_from_zip_bytes(content, m)
-                except FileNotFoundError:
-                    continue
-        raise FileNotFoundError(f"ZIP içinde şu adaylar bulunamadı: {try_members}")
-
-    if spec.startswith("urlzip::"):
-        url, member = spec[len("urlzip::"):].split("::", 1)
-        headers = {}
-        if url == "AUTO":
-            url, headers = _best_zip_url()
-        return _try(url, member, from_zip=True, headers=headers)
-
-    if spec.startswith("zip::"):
-        zip_path, member = spec[len("zip::"):].split("::", 1)
-        if not os.path.exists(zip_path):
-            raise FileNotFoundError(f"ZIP yok: {zip_path}")
-        return _try(zip_path, member, from_zip=False)
-
-    # düz dosya
-    if not os.path.exists(spec):
-        raise FileNotFoundError(f"Dosya yok: {spec}")
-    if spec.lower().endswith(".csv"):
-        return pd.read_csv(spec)
-    return pd.read_parquet(spec)
-
-# ---------------------------
-# Normalize: CSV (date+hour_range) → timestamp, risk_score → p_stack
-# ---------------------------
-def _ensure_hourly_schema(df: pd.DataFrame) -> pd.DataFrame:
-    cols_lower = {c.lower(): c for c in df.columns}
-
-    # --- GEOID ---
-    geokey = None
-    for k in ("geoid", "GEOID", "cell_id", "id"):
-        if k in df.columns: geokey = k; break
-        if k.lower() in cols_lower: geokey = cols_lower[k.lower()]; break
-    if geokey is None:
-        raise ValueError("GEOID/Cell ID kolonu bulunamadı.")
-    df = df.rename(columns={geokey: "geoid"})
-    df["geoid"] = df["geoid"].astype(str)
-
-    # --- Zaman (3 yol: timestamp/datetime | date+hour | date+hour_range) ---
-    if "timestamp" in df.columns:
-        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=False)
-    elif "datetime" in df.columns:
-        df["timestamp"] = pd.to_datetime(df["datetime"], utc=False)
-    else:
-        date_col = None
-        for k in ("date", "Date", "DATE"):
-            if k in df.columns: date_col = k; break
-        if date_col is None:
-            raise ValueError("Saatlik veri için 'timestamp/datetime' ya da 'date' tabanlı kolonlar bekleniyor.")
-
-        d0 = pd.to_datetime(df[date_col], errors="coerce").dt.floor("D")
-
-        hour_col = None
-        for k in ("hour", "Hour", "HOUR"):
-            if k in df.columns: hour_col = k; break
-
-        if hour_col is not None:
-            h = pd.to_numeric(df[hour_col], errors="coerce").fillna(0).astype(int).clip(0, 23)
-            df["timestamp"] = d0 + pd.to_timedelta(h, unit="h")
-        else:
-            hr_col = None
-            for k in ("hour_range","Hour_Range","HOUR_RANGE"):
-                if k in df.columns: hr_col = k; break
-            if hr_col is None:
-                raise ValueError("Saatlik tabloda 'timestamp/datetime' ya da 'date+hour' / 'date+hour_range' kolonları yok.")
-            start_h = (
-                df[hr_col].astype(str)
-                .str.extract(r"^(\d{1,2})")[0]
-                .fillna("0").astype(int).clip(0, 23)
-            )
-            df["timestamp"] = d0 + pd.to_timedelta(start_h, unit="h")
-
-    # --- category ---
-    if "category" not in df.columns:
-        df["category"] = "Genel"
-    else:
-        df["category"] = df["category"].astype(str)
-
-    # --- p_stack (olasılık) ---
-    if "p_stack" not in df.columns:
-        score_col = None
-        for c in ("risk_score", "risk", "prob", "probability", "score"):
-            if c in df.columns: score_col = c; break
-        if score_col is None:
-            raise ValueError("Beklenen olasılık kolonu yok: p_stack / risk_score")
-        df = df.rename(columns={score_col: "p_stack"})
-    df["p_stack"] = pd.to_numeric(df["p_stack"], errors="coerce")
-
-    return df[["timestamp", "geoid", "category", "p_stack"]].dropna(subset=["timestamp"])
-
-# ---------------------------
-# Cache'li yükleyiciler
-# ---------------------------
 @st.cache_data(show_spinner=False)
-def load_hourly(path: str) -> pd.DataFrame:
-    df = read_table_smart(path)
-    return _ensure_hourly_schema(df)
+def load_artifact_member(member: str) -> pd.DataFrame:
+    url, headers = resolve_latest_artifact_zip_url(REPOSITORY_OWNER, REPOSITORY_NAME, ARTIFACT_NAME_SHOULD_CONTAIN)
+    if not url:
+        raise RuntimeError("Artifact bulunamadı veya GITHUB_TOKEN yok.")
+    response = requests.get(url, headers=headers, timeout=120, allow_redirects=True)
+    response.raise_for_status()
+    return read_member_from_zip_bytes(response.content, member)
+
+# ------------------------------------------------------------
+# 🧭 Şema doğrulayıcılar (hourly/daily)
+# ------------------------------------------------------------
+
+def normalize_hourly_schema(hourly_df: pd.DataFrame) -> pd.DataFrame:
+    """Saatlik veriyi standart sütunlara dönüştürür: timestamp, date, hour, geoid, risk_score"""
+    column_lookup = {c.lower(): c for c in hourly_df.columns}
+
+    def pick_column(*names: str) -> str | None:
+        for name in names:
+            if name in hourly_df.columns:
+                return name
+            if name.lower() in column_lookup:
+                return column_lookup[name.lower()]
+        return None
+
+    date_column  = pick_column("date")
+    hour_column  = pick_column("hour")
+    geoid_column = pick_column("geoid", "GEOID", "cell_id", "id")
+    risk_column  = pick_column("risk_score", "p_stack", "prob", "probability", "score", "risk")
+
+    if not (date_column and hour_column and geoid_column and risk_column):
+        raise ValueError("Saatlik veri için 'date, hour, geoid, risk_score' sütunları gerekli.")
+
+    normalized = pd.DataFrame({
+        "date": pd.to_datetime(hourly_df[date_column], errors="coerce"),
+        "hour": pd.to_numeric(hourly_df[hour_column], errors="coerce").astype("Int64").clip(0, 23),
+        "geoid": hourly_df[geoid_column].astype(str),
+        "risk_score": pd.to_numeric(hourly_df[risk_column], errors="coerce"),
+    }).dropna(subset=["date", "hour", "geoid"]).copy()
+
+    normalized["timestamp"] = normalized["date"].dt.floor("D") + pd.to_timedelta(normalized["hour"].fillna(0).astype(int), unit="h")
+    return normalized[["timestamp", "date", "hour", "geoid", "risk_score"]]
+
+
+def normalize_daily_schema(daily_df: pd.DataFrame) -> pd.DataFrame:
+    """Günlük veriyi standart sütunlara dönüştürür: date, geoid, risk_score"""
+    column_lookup = {c.lower(): c for c in daily_df.columns}
+
+    def pick_column(*names: str) -> str | None:
+        for name in names:
+            if name in daily_df.columns:
+                return name
+            if name.lower() in column_lookup:
+                return column_lookup[name.lower()]
+        return None
+
+    date_column  = pick_column("date")
+    geoid_column = pick_column("geoid", "GEOID", "cell_id", "id")
+    risk_column  = pick_column("risk_score", "p_stack", "prob", "probability", "score", "risk")
+
+    if not (date_column and geoid_column and risk_column):
+        raise ValueError("Günlük veri için 'date, geoid, risk_score' sütunları gerekli.")
+
+    normalized = pd.DataFrame({
+        "date": pd.to_datetime(daily_df[date_column], errors="coerce").dt.floor("D"),
+        "geoid": daily_df[geoid_column].astype(str),
+        "risk_score": pd.to_numeric(daily_df[risk_column], errors="coerce"),
+    }).dropna(subset=["date", "geoid"]).copy()
+    return normalized[["date", "geoid", "risk_score"]]
+
+# ------------------------------------------------------------
+# 🗺️ Centroid yükleyici (opsiyonel)
+# ------------------------------------------------------------
+
+def coerce_centroid_dataframe(any_df: pd.DataFrame) -> pd.DataFrame | None:
+    """Herhangi bir centroid benzeri tabloyu standart {geoid, lat, lon} formuna getirir."""
+    column_lookup = {c.lower(): c for c in any_df.columns}
+
+    def pick_column(*candidates: str) -> str | None:
+        for name in candidates:
+            if name in any_df.columns:
+                return name
+            if name.lower() in column_lookup:
+                return column_lookup[name.lower()]
+        return None
+
+    geoid_column = pick_column("geoid", "GEOID", "cell_id", "id")
+    lat_column   = pick_column("lat", "latitude", "y")
+    lon_column   = pick_column("lon", "lng", "longitude", "x")
+
+    if not (geoid_column and lat_column and lon_column):
+        return None
+
+    standardized = pd.DataFrame({
+        "geoid": any_df[geoid_column].astype(str),
+        "lat": pd.to_numeric(any_df[lat_column], errors="coerce"),
+        "lon": pd.to_numeric(any_df[lon_column], errors="coerce"),
+    }).dropna(subset=["lat", "lon"]).copy()
+
+    return standardized.drop_duplicates("geoid")
 
 @st.cache_data(show_spinner=False)
-def load_daily(path: str) -> pd.DataFrame | None:
+def load_centroids_optional() -> pd.DataFrame | None:
     try:
-        df = read_table_smart(path)
+        url, headers = resolve_latest_artifact_zip_url(REPOSITORY_OWNER, REPOSITORY_NAME, ARTIFACT_NAME_SHOULD_CONTAIN)
+        if not url:
+            return None
+        response = requests.get(url, headers=headers, timeout=120, allow_redirects=True)
+        response.raise_for_status()
+        with zipfile.ZipFile(BytesIO(response.content)) as zip_file:
+            for candidate in CENTROID_FILE_CANDIDATES:
+                try:
+                    with zip_file.open(candidate) as file_obj:
+                        raw_bytes = file_obj.read()
+                    try:
+                        centroid_df = pd.read_parquet(BytesIO(raw_bytes))
+                    except Exception:
+                        centroid_df = pd.read_csv(BytesIO(raw_bytes))
+                    standardized = coerce_centroid_dataframe(centroid_df)
+                    if standardized is not None and len(standardized):
+                        return standardized
+                except KeyError:
+                    continue
+        return None
     except Exception:
         return None
 
-    # 'date' yoksa timestamp'tan üret
-    if "date" not in df.columns:
-        ts_col = None
-        for c in ("timestamp", "datetime"):
-            if c in df.columns:
-                ts_col = c; break
-        if ts_col is not None:
-            dt = pd.to_datetime(df[ts_col], errors="coerce", utc=False)
-            if dt.notna().any():
-                df["date"] = dt.dt.floor("D")
-    else:
-        df["date"] = pd.to_datetime(df["date"], errors="coerce", utc=False)
-    return df
+# ------------------------------------------------------------
+# 📥 Veri yükleme (cache'li)
+# ------------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def load_hourly_dataframe() -> pd.DataFrame:
+    raw_hourly_df = load_artifact_member(ARTIFACT_MEMBER_HOURLY)
+    return normalize_hourly_schema(raw_hourly_df)
 
-# ---------------------------
-# Zaman filtresi
-# ---------------------------
-def filter_by_time(df: pd.DataFrame, mode: str,
-                   ts: datetime | None,
-                   day: datetime | None,
-                   start: datetime | None,
-                   end: datetime | None) -> pd.DataFrame:
-    if mode == "Tek saat":
-        if ts is None:
-            return df.iloc[0:0]
-        return df[df["timestamp"] == pd.to_datetime(ts)]
-    elif mode == "Gün (24 saat)":
-        if day is None:
-            return df.iloc[0:0]
-        t0 = pd.to_datetime(day).replace(hour=0, minute=0, second=0, microsecond=0)
-        t1 = t0 + timedelta(days=1)
-        return df[(df["timestamp"] >= t0) & (df["timestamp"] < t1)]
-    else:  # Aralık
-        if not (start and end):
-            return df.iloc[0:0]
-        t0 = pd.to_datetime(start); t1 = pd.to_datetime(end)
-        return df[(df["timestamp"] >= t0) & (df["timestamp"] <= t1)]
+@st.cache_data(show_spinner=False)
+def load_daily_dataframe() -> pd.DataFrame:
+    raw_daily_df = load_artifact_member(ARTIFACT_MEMBER_DAILY)
+    return normalize_daily_schema(raw_daily_df)
 
-def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
-    buf = io.StringIO(); df.to_csv(buf, index=False); return buf.getvalue().encode("utf-8")
+# ------------------------------------------------------------
+# 🧮 Risk bucket fonksiyonları (sabit eşikler)
+# ------------------------------------------------------------
+RISK_BUCKET_DEFINITIONS = [
+    (0.0, 0.20, "Çok Düşük"),
+    (0.20, 0.40, "Düşük"),
+    (0.40, 0.60, "Orta"),
+    (0.60, 0.80, "Yüksek"),
+    (0.80, 1.01, "Çok Yüksek"),
+]
 
-# ---------------------------
-# Varsayılan yollar (AUTO: artifact -> release)
-# ---------------------------
-# Yeni artifact paketinde dosyalar kök seviyede
-DEFAULT_HOURLY = "urlzip::AUTO::risk_hourly.parquet"
-DEFAULT_DAILY  = "urlzip::AUTO::fr_crime_09.parquet"
+RISK_BUCKET_COLORS_RGBA = {
+    "Çok Düşük": [220, 220, 220, 160],
+    "Düşük":     [180, 210, 255, 200],
+    "Orta":      [255, 220, 130, 210],
+    "Yüksek":    [255, 170, 110, 220],
+    "Çok Yüksek": [255, 90, 90, 240],
+}
 
-# ---------------------------
-# Sidebar — seçimler
-# ---------------------------
+def map_value_to_risk_bucket(probability_value: float) -> str:
+    value = 0.0 if pd.isna(probability_value) else float(probability_value)
+    for lower, upper, name in RISK_BUCKET_DEFINITIONS:
+        if lower <= value < upper:
+            return name
+    return "Çok Düşük"
+
+# ------------------------------------------------------------
+# 🧾 CSV indir yardımcı
+# ------------------------------------------------------------
+
+def dataframe_to_csv_bytes(frame: pd.DataFrame) -> bytes:
+    buffer = io.StringIO()
+    frame.to_csv(buffer, index=False)
+    return buffer.getvalue().encode("utf-8")
+
+# ------------------------------------------------------------
+# 🎛️ UI — Ayarlar
+# ------------------------------------------------------------
+st.set_page_config(page_title="🌀 Suç Tahmini", layout="wide")
 st.sidebar.header("⚙️ Ayarlar")
 
-hourly_path = st.sidebar.text_input(
-    "Saatlik çıktı (ZIP/URL/yerel destekli)",
-    value=DEFAULT_HOURLY,
-    help=(
-        "Örnekler:\n"
-        "- URL ZIP (AUTO): urlzip::AUTO::risk_hourly.parquet (csv de olabilir)\n"
-        "- Yerel ZIP: zip::/path/to/fr-minimal-parquet.zip::risk_hourly.parquet\n"
-        "- Düz CSV/Parquet: /path/to/risk_hourly.csv | .parquet"
-    ),
-)
-daily_path  = st.sidebar.text_input(
-    "(Opsiyonel) Günlük/özet dosyası",
-    value=DEFAULT_DAILY,
-    help=(
-        "Örnekler:\n"
-        "- URL ZIP (AUTO): urlzip::AUTO::fr_crime_09.parquet\n"
-        "- Yerel ZIP: zip::/path/to/fr-minimal-parquet.zip::fr_crime_09.parquet\n"
-        "- Düz parquet/csv: /path/to/risk_daily_by_category.parquet"
-    ),
+selected_resolution_mode = st.sidebar.radio(
+    "Zaman çözünürlüğü",
+    ["Saatlik (≤7 gün)", "Günlük (≤365 gün)"],
+    index=0,
 )
 
-# Veri yükle
-try:
-    df = load_hourly(hourly_path)
-except Exception as e:
-    st.error(f"Saatlik dosya okunamadı:\n\n{e}")
-    st.info("İpucu: Artifact için ortamda GITHUB_TOKEN/GH_TOKEN/github_token bulunmalı. "
-            "Yoksa Release fallback denenir.")
-    st.stop()
-
-df_daily = load_daily(daily_path)
-
-# ---------------------------
-# Zaman modu & seçimler
-# ---------------------------
-time_mode = st.sidebar.radio("Zaman seçimi", ["Tek saat", "Gün (24 saat)", "Aralık"], horizontal=False)
-
-ts_single = day_single = start_range = end_range = None
-if time_mode == "Tek saat":
-    ts_candidates = sorted(pd.to_datetime(df["timestamp"]).unique())
-    ts_single = st.sidebar.selectbox("Zaman (timestamp)", options=ts_candidates, index=0) if ts_candidates else None
-elif time_mode == "Gün (24 saat)":
-    days = sorted(pd.to_datetime(df["timestamp"]).dt.date.unique())
-    day_single = st.sidebar.selectbox("Gün", options=days, index=0) if days else None
+current_datetime = datetime.now()
+if selected_resolution_mode.startswith("Saatlik"):
+    maximum_selectable_days = 7
+    st.sidebar.caption("Saatlik görünümde en fazla 7 gün seçebilirsiniz.")
 else:
-    ts_all = sorted(pd.to_datetime(df["timestamp"]).unique())
-    if ts_all:
-        start_range = st.sidebar.selectbox("Başlangıç", options=ts_all, index=0)
-        end_range   = st.sidebar.selectbox("Bitiş", options=ts_all, index=len(ts_all)-1)
-    else:
-        st.sidebar.info("Uyarı: Saatlik veri boş görünüyor.")
+    maximum_selectable_days = 365
+    st.sidebar.caption("Günlük görünümde en fazla 365 gün seçebilirsiniz.")
 
-# Kategori & GEOID seçimleri
-cats = sorted(df["category"].astype(str).unique().tolist())
-geoids = sorted(df["geoid"].astype(str).unique().tolist())
-
-# Boşsa hata vermesin diye güvenli default
-sel_cats = st.sidebar.multiselect(
-    "Suç kategorileri",
-    options=cats,
-    default=cats if cats else [],
+selected_start_date = st.sidebar.date_input(
+    "Başlangıç tarihi",
+    value=(current_datetime - timedelta(days=1)).date(),
+)
+selected_end_date = st.sidebar.date_input(
+    "Bitiş tarihi",
+    value=current_datetime.date(),
 )
 
-scope_choice = st.sidebar.radio("Alan", ["Tüm şehir", "GEOID seç"], horizontal=True)
-if scope_choice == "GEOID seç":
-    sel_geoids = st.sidebar.multiselect(
-        "GEOID",
-        options=geoids,
-        default=geoids[:20] if geoids else [],
-    )
+# Tarih aralığını güvenli biçimde sınırla
+if (pd.to_datetime(selected_end_date) - pd.to_datetime(selected_start_date)).days > maximum_selectable_days:
+    selected_end_date = (pd.to_datetime(selected_start_date) + pd.Timedelta(days=maximum_selectable_days)).date()
+    st.sidebar.warning(f"Seçim {maximum_selectable_days} günü aşamaz; bitiş {selected_end_date} olarak güncellendi.")
+
+# Opsiyonel GEOID filtre girişi
+geoid_filter_text = st.sidebar.text_input("GEOID filtre (virgülle ayır)", value="")
+selected_geoids = [g.strip() for g in geoid_filter_text.split(",") if g.strip()]
+
+# Tablo boyutu (Top-K)
+selected_top_k = st.sidebar.slider("Top-K (tablo)", 10, 200, 50, step=10)
+
+# ------------------------------------------------------------
+# 📥 Veri yükleme ve filtreleme
+# ------------------------------------------------------------
+with st.spinner("Veriler yükleniyor…"):
+    if selected_resolution_mode.startswith("Saatlik"):
+        hourly_dataframe = load_hourly_dataframe()
+        start_ts = pd.to_datetime(selected_start_date)
+        end_ts   = pd.to_datetime(selected_end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+        hourly_dataframe = hourly_dataframe[(hourly_dataframe["timestamp"] >= start_ts) & (hourly_dataframe["timestamp"] <= end_ts)].copy()
+        if selected_geoids:
+            hourly_dataframe = hourly_dataframe[hourly_dataframe["geoid"].isin(selected_geoids)].copy()
+        # Seçilen pencerede GEOID bazında ortalama risk
+        aggregated_dataframe = (
+            hourly_dataframe.groupby("geoid", as_index=False)["risk_score"].mean().rename(columns={"risk_score": "risk_mean"})
+        )
+        data_used_for_views = hourly_dataframe
+    else:
+        daily_dataframe = load_daily_dataframe()
+        start_day = pd.to_datetime(selected_start_date).floor("D")
+        end_day   = pd.to_datetime(selected_end_date).floor("D")
+        daily_dataframe = daily_dataframe[(daily_dataframe["date"] >= start_day) & (daily_dataframe["date"] <= end_day)].copy()
+        if selected_geoids:
+            daily_dataframe = daily_dataframe[daily_dataframe["geoid"].isin(selected_geoids)].copy()
+        aggregated_dataframe = (
+            daily_dataframe.groupby("geoid", as_index=False)["risk_score"].mean().rename(columns={"risk_score": "risk_mean"})
+        )
+        data_used_for_views = daily_dataframe
+
+# Risk bucket ve sıralama
+if len(aggregated_dataframe):
+    aggregated_dataframe["risk_bucket"] = aggregated_dataframe["risk_mean"].map(map_value_to_risk_bucket)
+    aggregated_sorted = aggregated_dataframe.sort_values("risk_mean", ascending=False).reset_index(drop=True)
 else:
-    sel_geoids = geoids if geoids else []
+    aggregated_sorted = aggregated_dataframe
 
-agg_daily_how = st.sidebar.selectbox("Günlük agregasyon (görünüm)", ["Ortalama", "Maksimum"], index=0)
-top_k = st.sidebar.slider("Top-K sıralama (tablo)", min_value=10, max_value=200, value=50, step=10)
-risk_cut = st.sidebar.slider("Risk eşiği (vurgulama)", 0.0, 1.0, 0.5, 0.05)
+# ------------------------------------------------------------
+# 🧠 Özet kartlar
+# ------------------------------------------------------------
+st.title("🌀 Suç Tahmini — rev3")
+st.caption("Saatlik (≤7 gün) / Günlük (≤365 gün) pencerede GEOID bazlı ortalama risk.")
 
-# ---------------------------
-# İçerik — başlık
-# ---------------------------
-st.title("🌀 Suç Tahmini")
-st.caption("Zaman–mekân–suç türü bazlı olasılık tahmini (stacking ensemble).")
+summary_col_1, summary_col_2, summary_col_3 = st.columns(3)
+summary_col_1.metric("Kapsanan kayıt", f"{len(data_used_for_views):,}")
+summary_col_2.metric("GEOID sayısı", f"{aggregated_sorted['geoid'].nunique():,}" if len(aggregated_sorted) else "0")
+summary_col_3.metric("Ortalama risk", f"{data_used_for_views['risk_score'].mean():.3f}" if len(data_used_for_views) else "—")
 
-# ---------------------------
-# Filtrele
-# ---------------------------
-df_t = df.copy()
-if time_mode:
-    df_t = filter_by_time(df_t, time_mode, ts_single, day_single, start_range, end_range)
-if sel_cats:
-    df_t = df_t[df_t["category"].isin(sel_cats)]
-if sel_geoids:
-    df_t = df_t[df_t["geoid"].isin(sel_geoids)]
+# ------------------------------------------------------------
+# 🔝 Top-K tablo + indir
+# ------------------------------------------------------------
+st.subheader("🔝 Top-K GEOID")
+visible_topk_dataframe = aggregated_sorted.head(selected_top_k).copy()
+st.dataframe(visible_topk_dataframe, use_container_width=True, height=420)
+st.download_button(
+    "⬇️ CSV indir (Top-K)",
+    data=dataframe_to_csv_bytes(visible_topk_dataframe),
+    file_name="risk_topk.csv",
+    mime="text/csv",
+)
 
-# ---------------------------
-# Özet kartları
-# ---------------------------
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Kapsanan saat sayısı", f"{df_t['timestamp'].nunique():,}")
-c2.metric("GEOID sayısı", f"{df_t['geoid'].nunique():,}")
-c3.metric("Kategori sayısı", f"{df_t['category'].nunique():,}")
-c4.metric("Ortalama risk", f"{df_t['p_stack'].mean():.3f}" if len(df_t) else "—")
-
-# ---------------------------
-# Görünümler
-# ---------------------------
-tab1, tab2, tab3 = st.tabs(["🔝 Top-K tablo", "📈 Zaman serisi", "📊 Kategori/GEOID özet"])
-
-with tab1:
-    if time_mode == "Tek saat":
-        show_df = df_t.sort_values("p_stack", ascending=False).head(top_k).reset_index(drop=True)
-        st.subheader("Top-K (tek saat)")
-        st.dataframe(
-            show_df.style.highlight_between(subset="p_stack", left=risk_cut, right=1.0, color="#ffd6cc"),
-            use_container_width=True, height=520
-        )
-    else:
-        show_df = (
-            df_t.groupby(["geoid", "category"], as_index=False)
-                .agg(mean_risk=("p_stack", "mean"),
-                     max_risk=("p_stack", "max"),
-                     n_hours=("p_stack", "size"))
-        )
-        order_col = "mean_risk" if agg_daily_how == "Ortalama" else "max_risk"
-        show_df = show_df.sort_values(order_col, ascending=False).head(top_k).reset_index(drop=True)
-        st.subheader(f"Top-K (aralık/gün) — {order_col}")
-        st.dataframe(
-            show_df.style.highlight_between(subset=order_col, left=risk_cut, right=1.0, color="#ffd6cc"),
-            use_container_width=True, height=520
-        )
-
-    st.download_button("⬇️ CSV indir (gösterilen)",
-                       data=df_to_csv_bytes(show_df),
-                       file_name="crime_forecast_topk.csv",
-                       mime="text/csv")
-
-with tab2:
-    if len(df_t) == 0:
-        st.info("Seçilen zaman/kapsam için veri yok.")
-    else:
-        geo_for_plot = st.multiselect("Grafik için GEOID seç",
-                                      options=sorted(df_t["geoid"].unique().tolist()),
-                                      default=sorted(df_t["geoid"].unique().tolist())[:3])
-        df_plot = df_t[df_t["geoid"].isin(geo_for_plot)].copy()
-        st.line_chart(
-            df_plot.pivot_table(index="timestamp", columns="geoid", values="p_stack", aggfunc="mean").sort_index(),
-            height=420
-        )
-
-with tab3:
-    if len(df_t) == 0:
-        st.info("Seçilen zaman/kapsam için veri yok.")
-    else:
-        cA, cB = st.columns(2)
-        cat_summary = df_t.groupby("category", as_index=False)["p_stack"].mean().sort_values("p_stack", ascending=False)
-        cA.subheader("Kategori ortalama risk")
-        cA.bar_chart(cat_summary.set_index("category"), height=300)
-
-        geo_summary = (
-            df_t.groupby("geoid", as_index=False)["p_stack"].mean()
-               .sort_values("p_stack", ascending=False)
-               .head(20)
-        )
-        cB.subheader("GEOID ortalama risk (Top-20)")
-        cB.bar_chart(geo_summary.set_index("geoid"), height=300)
-
-# ---------------------------
-# Günlük/özet (opsiyonel)
-# ---------------------------
-st.markdown("---")
-st.subheader("📅 Günlük özet (opsiyonel)")
-
-def _has_daily_view_cols(d: pd.DataFrame) -> bool:
-    return ("date" in d.columns) and ("daily_score" in d.columns)
-
-if df_daily is None:
-    st.caption("`fr_crime_09.parquet` (veya `risk_daily_by_category.parquet`) bulunamadı/okunamadı — opsiyonel bölümdür.")
+# ------------------------------------------------------------
+# 📈 Zaman serisi (seçili GEOID'ler)
+# ------------------------------------------------------------
+st.subheader("📈 Zaman serisi (risk_score)")
+if len(data_used_for_views) == 0:
+    st.info("Seçilen aralık için veri yok.")
 else:
-    if _has_daily_view_cols(df_daily):
-        days_all = sorted(pd.to_datetime(df_daily["date"]).unique())
-        idx = len(days_all)-1 if len(days_all) else 0
-        day_sel = st.selectbox("Gün seç", options=days_all, index=idx if len(days_all) else None)
-        d1 = df_daily[pd.to_datetime(df_daily["date"]) == pd.to_datetime(day_sel)]
-        st.dataframe(d1.sort_values("daily_score", ascending=False).head(top_k).reset_index(drop=True),
-                     use_container_width=True, height=360)
+    default_geoids_for_plot = visible_topk_dataframe["geoid"].head(3).tolist() if len(visible_topk_dataframe) else []
+    selectable_geoids = sorted(data_used_for_views["geoid"].unique().tolist())
+    chosen_geoids_for_plot = st.multiselect("Grafik GEOID seç", options=selectable_geoids, default=default_geoids_for_plot)
+    if selected_resolution_mode.startswith("Saatlik"):
+        time_series_pivot = (
+            data_used_for_views[data_used_for_views["geoid"].isin(chosen_geoids_for_plot)]
+            .pivot_table(index="timestamp", columns="geoid", values="risk_score", aggfunc="mean")
+            .sort_index()
+        )
     else:
-        st.caption("Günlük özet için gerekli kolonlar bulunamadı (`date` + `daily_score`). Bu bölüm opsiyoneldir.")
+        time_series_pivot = (
+            data_used_for_views[data_used_for_views["geoid"].isin(chosen_geoids_for_plot)]
+            .pivot_table(index="date", columns="geoid", values="risk_score", aggfunc="mean")
+            .sort_index()
+        )
+    if len(time_series_pivot):
+        st.line_chart(time_series_pivot, height=360)
+    else:
+        st.caption("Seçilen GEOID'ler için veri yok.")
 
-# ---------------------------
-# Dipnot
-# ---------------------------
+# ------------------------------------------------------------
+# 🗺️ Harita (opsiyonel centroid bulunursa)
+# ------------------------------------------------------------
+st.subheader("🗺️ Harita — 5 seviye risk renklendirme")
+centroid_dataframe = load_centroids_optional()
+if centroid_dataframe is None or len(centroid_dataframe) == 0:
+    st.info("Centroid verisi (geoid→lat/lon) artifact içinde bulunamadı. Harita devre dışı.")
+else:
+    map_dataframe = aggregated_sorted.merge(centroid_dataframe, on="geoid", how="left").dropna(subset=["lat", "lon"]).copy()
+    if len(map_dataframe) == 0:
+        st.info("Harita için geçerli nokta yok (lat/lon eşleşmedi).")
+    else:
+        map_dataframe["color"] = map_dataframe["risk_bucket"].map(RISK_BUCKET_COLORS_RGBA)
+        legend_markdown = (
+            "**Lejand:** "
+            "<span style='background:#ddd;padding:2px 6px;border-radius:4px;'>Çok Düşük</span> "
+            "<span style='background:#b4d2ff;padding:2px 6px;border-radius:4px;'>Düşük</span> "
+            "<span style='background:#ffdc82;padding:2px 6px;border-radius:4px;'>Orta</span> "
+            "<span style='background:#ffaa6e;padding:2px 6px;border-radius:4px;'>Yüksek</span> "
+            "<span style='background:#ff5a5a;padding:2px 6px;border-radius:4px;'>Çok Yüksek</span> "
+        )
+        st.markdown(legend_markdown, unsafe_allow_html=True)
+
+        import pydeck as pdk
+        scatter_layer = pdk.Layer(
+            "ScatterplotLayer",
+            data=map_dataframe,
+            get_position='[lon, lat]',
+            get_fill_color='color',
+            get_radius=80 if selected_resolution_mode.startswith("Saatlik") else 120,
+            pickable=True,
+            radius_min_pixels=2,
+            radius_max_pixels=20,
+            auto_highlight=True,
+        )
+        initial_view_state = pdk.ViewState(
+            latitude=float(map_dataframe["lat"].median()),
+            longitude=float(map_dataframe["lon"].median()),
+            zoom=11,
+        )
+        st.pydeck_chart(pdk.Deck(
+            layers=[scatter_layer],
+            initial_view_state=initial_view_state,
+            tooltip={"text": "GEOID {geoid}
+Risk {risk_mean:.3f}
+Seviye {risk_bucket}"},
+        ))
+
+# ------------------------------------------------------------
+# 📝 Dipnot
+# ------------------------------------------------------------
 st.caption(
-    "Model: üç motorlu stacking (short/mid) + mevsimsel baseline (long). "
-    "Olasılıklar kalibre edilmiştir (isotonic). `confidence` ufka göre azaltılmış güven skorunu ifade eder."
+    "Kaynak: artifact 'sf-crime-parquet' → risk_hourly_grid_full_labeled / risk_daily_grid_full_labeled.
+"
+    "Harita, artifact içinde geoid→lat/lon eşleşmesi bulunduğu durumda etkinleşir."
 )
