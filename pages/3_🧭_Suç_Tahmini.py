@@ -464,11 +464,9 @@ else:
         st.pydeck_chart(pdk.Deck(
             layers=[scatter_layer],
             initial_view_state=initial_view_state,
-            tooltip={"text": "GEOID {geoid}
-Risk {risk_mean:.3f}
-Seviye {risk_bucket}"},
-        ))
-
+            tooltip={
+                "text": "GEOID {geoid}\\nRisk {risk_mean:.3f}\\nSeviye {risk_bucket}"
+            }
 # ------------------------------------------------------------
 # 📝 Dipnot
 # ------------------------------------------------------------
