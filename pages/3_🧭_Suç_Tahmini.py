@@ -466,12 +466,14 @@ else:
             initial_view_state=initial_view_state,
             tooltip={
                 "text": "GEOID {geoid}\\nRisk {risk_mean:.3f}\\nSeviye {risk_bucket}"
-            }
+            },
+        ))
 # ------------------------------------------------------------
 # 📝 Dipnot
 # ------------------------------------------------------------
 st.caption(
-    "Kaynak: artifact 'sf-crime-parquet' → risk_hourly_grid_full_labeled / risk_daily_grid_full_labeled.
-"
+    "Kaynak: artifact 'sf-crime-parquet' → "
+    "risk_hourly_grid_full_labeled / risk_daily_grid_full_labeled.\n"
     "Harita, artifact içinde geoid→lat/lon eşleşmesi bulunduğu durumda etkinleşir."
 )
+
