@@ -256,8 +256,23 @@ if not hr_label:
     st.error("CSV’de hour_range bulunamadı.")
     st.stop()
 
+# ── Meta: Model son eğitim & veri seti güncelleme zamanını (UTC + SF) göster
+try:
+    # MODEL_LAST_TRAIN genelde UTC’dir; emin olmak için utc=True
+    dt_utc = pd.to_datetime(MODEL_LAST_TRAIN, utc=True)
+    dt_sf  = dt_utc.tz_convert(ZoneInfo(TARGET_TZ))
+    utc_txt = dt_utc.strftime("%Y-%m-%d %H:%M UTC")
+    sf_txt  = dt_sf.strftime("%Y-%m-%d %H:%M")
+    st.caption(
+        f"Model v{MODEL_VERSION} — **Son eğitim & veri seti güncelleme:** {utc_txt} (SF {sf_txt})"
+    )
+except Exception:
+    # Her ihtimale karşı fallback
+    st.caption(f"Model v{MODEL_VERSION} — **Son eğitim & veri seti güncelleme:** {MODEL_LAST_TRAIN}")
+
+# Görüntülenen zaman penceresi (şimdiki SF saatine göre)
 st.caption(
-    f"SF saati: **{now_sf:%Y-%m-%d %H:%M}** — gösterilen dilim: **{hr_label}**"
+    f"SF saati (şimdi): **{now_sf:%Y-%m-%d %H:%M}** — gösterilen dilim: **{hr_label}**"
 )
 
 # Filtrele → sadece anlık hour_range göster
