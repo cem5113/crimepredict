@@ -217,8 +217,10 @@ def draw_map(gj: dict):
 # Çalıştır (yalnızca ANLIK hour_range)
 # ──────────────────────────────────────────────────────────────────────────────
 st.title("🕒 Anlık Suç Risk Haritası")
-st.caption("CSV doğrudan okunur; `date` kullanılmaz, yalnızca anlık `hour_range` gösterilir.")
-
+st.caption(
+    f"Bu harita şu anki saat aralığı (**{selected_hr}**) için model tarafından tahmin edilen suç riskini gösterir.\n\n"
+    "Başka bir güne/saate ait tahmin görmek isterseniz → **Suç Tahmini** sekmesini kullanın."
+)
 # Token kontrol
 if not os.getenv("GITHUB_TOKEN"):
     st.error("GITHUB_TOKEN ayarlı değil. Secrets veya env üzerinden tanımlayın.")
