@@ -1,7 +1,7 @@
 # 3_🧭_Suç_Tahmini — Haritalı görünüm (GEOID + centroid)
 # Saatlik (≤7 gün; tek saat / saat aralığı) ve Günlük (≤365 gün) risk görünümleri
 # Kaynak: artifact 'sf-crime-parquet' → risk_hourly_grid_full_labeled / risk_daily_grid_full_labeled
-# Harita için centroid: yükleme + artifact override + otomatik adaylar
+# Not: Harita için centroid yalnızca artifact içindeki adaylardan bulunur (upload yok).
 
 import os
 import io
@@ -22,9 +22,9 @@ REPOSITORY_OWNER = "cem5113"
 REPOSITORY_NAME  = "crime_prediction_data"
 ARTIFACT_NAME_SHOULD_CONTAIN = "sf-crime-parquet"  # Artifact adında bu ifade geçmeli
 
-# Artifact içindeki beklenen dosya adları (üye/"member")
-ARTIFACT_MEMBER_HOURLY  = "risk_hourly_grid_full_labeled.parquet"   # parquet yoksa .csv denenir
-ARTIFACT_MEMBER_DAILY   = "risk_daily_grid_full_labeled.parquet"    # parquet yoksa .csv denenir
+# Artifact içindeki beklenen dosyalar
+ARTIFACT_MEMBER_HOURLY = "risk_hourly_grid_full_labeled.parquet"   # parquet yoksa .csv denenir
+ARTIFACT_MEMBER_DAILY  = "risk_daily_grid_full_labeled.parquet"    # parquet yoksa .csv denenir
 
 # Centroid için otomatik adaylar (artifact içinde aranır)
 CENTROID_FILE_CANDIDATES = [
@@ -67,7 +67,8 @@ def resolve_latest_artifact_zip_url(owner: str, repo: str, name_contains: str):
     if not token:
         return None, {}
     base = f"https://api.github.com/repos/{owner}/{repo}"
-    response = requests.get(f"{base}/actions/artifacts?per_page=100", headers=github_api_headers(), timeout=60)
+    response = requests.get(f"{base}/actions/artifacts?per_page=100",
+                            headers=github_api_headers(), timeout=60)
     response.raise_for_status()
     artifacts = (response.json() or {}).get("artifacts", []) or []
     artifacts = [a for a in artifacts if (name_contains in a.get("name", "")) and not a.get("expired")]
@@ -132,7 +133,7 @@ def load_artifact_member(member: str) -> pd.DataFrame:
 # ------------------------------------------------------------
 def normalize_hourly_schema(df: pd.DataFrame) -> pd.DataFrame:
     cols = {c.lower(): c for c in df.columns}
-    def pick(*names): 
+    def pick(*names):
         for n in names:
             if n in df.columns: return n
             if n.lower() in cols: return cols[n.lower()]
@@ -156,7 +157,7 @@ def normalize_hourly_schema(df: pd.DataFrame) -> pd.DataFrame:
 
 def normalize_daily_schema(df: pd.DataFrame) -> pd.DataFrame:
     cols = {c.lower(): c for c in df.columns}
-    def pick(*names): 
+    def pick(*names):
         for n in names:
             if n in df.columns: return n
             if n.lower() in cols: return cols[n.lower()]
@@ -176,7 +177,7 @@ def normalize_daily_schema(df: pd.DataFrame) -> pd.DataFrame:
     return out[["date","geoid","risk_score"]]
 
 # ------------------------------------------------------------
-# 🗺️ Centroid yükleyici (upload + artifact override + aday tarama)
+# 🗺️ Centroid yükleyici (yalnızca artifact içi otomatik arama)
 # ------------------------------------------------------------
 def coerce_centroids(any_df: pd.DataFrame) -> pd.DataFrame | None:
     cols = {c.lower(): c for c in any_df.columns}
@@ -199,56 +200,30 @@ def coerce_centroids(any_df: pd.DataFrame) -> pd.DataFrame | None:
     return out.drop_duplicates("geoid")
 
 @st.cache_data(show_spinner=False)
-def load_centroids_optional(override_member: str = "", uploaded_file=None) -> pd.DataFrame | None:
-    # 1) Kullanıcı yüklediyse
-    if uploaded_file is not None:
-        try:
-            if uploaded_file.name.lower().endswith(".parquet"):
-                d = pd.read_parquet(uploaded_file)
-            else:
-                d = pd.read_csv(uploaded_file)
-            c = coerce_centroids(d)
-            if c is not None and len(c):
-                return c
-        except Exception:
-            pass
-    # 2) Artifact içi: override adı
+def load_centroids_from_artifact() -> pd.DataFrame | None:
     try:
         url, headers = resolve_latest_artifact_zip_url(REPOSITORY_OWNER, REPOSITORY_NAME, ARTIFACT_NAME_SHOULD_CONTAIN)
-        if url:
-            resp = requests.get(url, headers=headers, timeout=120, allow_redirects=True)
-            resp.raise_for_status()
-            with zipfile.ZipFile(BytesIO(resp.content)) as z:
-                if override_member:
+        if not url:
+            return None
+        resp = requests.get(url, headers=headers, timeout=120, allow_redirects=True)
+        resp.raise_for_status()
+        with zipfile.ZipFile(BytesIO(resp.content)) as z:
+            for cand in CENTROID_FILE_CANDIDATES:
+                try:
+                    with z.open(cand) as f:
+                        b = f.read()
                     try:
-                        with z.open(override_member) as f:
-                            b = f.read()
-                        try:
-                            dfm = pd.read_parquet(BytesIO(b))
-                        except Exception:
-                            dfm = pd.read_csv(BytesIO(b))
-                        c = coerce_centroids(dfm)
-                        if c is not None and len(c):
-                            return c
-                    except KeyError:
-                        pass
-                # 3) Otomatik adaylar
-                for cand in CENTROID_FILE_CANDIDATES:
-                    try:
-                        with z.open(cand) as f:
-                            b = f.read()
-                        try:
-                            dfm = pd.read_parquet(BytesIO(b))
-                        except Exception:
-                            dfm = pd.read_csv(BytesIO(b))
-                        c = coerce_centroids(dfm)
-                        if c is not None and len(c):
-                            return c
-                    except KeyError:
-                        continue
+                        dfm = pd.read_parquet(BytesIO(b))
+                    except Exception:
+                        dfm = pd.read_csv(BytesIO(b))
+                    c = coerce_centroids(dfm)
+                    if c is not None and len(c):
+                        return c
+                except KeyError:
+                    continue
+        return None
     except Exception:
         return None
-    return None
 
 # ------------------------------------------------------------
 # 🧮 Risk bucket (sabit eşikler)
@@ -305,13 +280,8 @@ if (pd.to_datetime(d_end) - pd.to_datetime(d_start)).days > max_days:
 geof_txt = st.sidebar.text_input("GEOID filtre (virgülle ayır)", value="")
 geoids_sel = [g.strip() for g in geof_txt.split(",") if g.strip()]
 
-# Top-K
+# Top-K (tablo)
 top_k = st.sidebar.slider("Top-K (tablo)", 10, 200, 50, step=10)
-
-# — Centroid kaynakları —
-st.sidebar.markdown("---")
-centroid_upload = st.sidebar.file_uploader("Yerel centroid dosyası yükle (csv/parquet)", type=["csv","parquet"])
-centroid_member_override = st.sidebar.text_input("Artifact içi centroid dosyası adı (ops.)", value="")
 
 # ------------------------------------------------------------
 # 📥 Veri yükleme ve filtre
@@ -349,12 +319,12 @@ else:
     agg_sorted = agg
 
 # ------------------------------------------------------------
-# 🗺️ HARİTA — EN ÜSTE ALINDI
+# 🗺️ HARİTA — EN ÜSTE
 # ------------------------------------------------------------
 st.subheader("🗺️ Harita — 5 seviye risk renklendirme")
-centroids = load_centroids_optional(centroid_member_override, centroid_upload)
+centroids = load_centroids_from_artifact()
 if centroids is None or len(centroids) == 0:
-    st.info("Centroid (geoid→lat/lon) bulunamadı. Harita devre dışı. Sol menüden centroid dosyası yükleyebilir veya artifact içi bir üye adı girebilirsiniz.")
+    st.info("Centroid (geoid→lat/lon) artifact içinde bulunamadı. Harita devre dışı.")
 else:
     map_df = agg_sorted.merge(centroids, on="geoid", how="left").dropna(subset=["lat","lon"]).copy()
     if len(map_df) == 0:
@@ -457,5 +427,5 @@ else:
 # ------------------------------------------------------------
 st.caption(
     "Kaynak: artifact 'sf-crime-parquet' → risk_hourly_grid_full_labeled / risk_daily_grid_full_labeled. "
-    "Harita, centroid (geoid→lat/lon) sağlandığında otomatik etkinleşir."
+    "Harita, centroid (geoid→lat/lon) artifact içinde bulunursa otomatik etkinleşir."
 )
