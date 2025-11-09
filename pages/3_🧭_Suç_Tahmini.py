@@ -1,4 +1,4 @@
-# 3_🧭_Suç_Tahmini 
+# 3_🧭_Suç_Tahmini — rev3 (artifact: sf-crime-parquet)
 # Tam kapsamlı: saatlik (≤7 gün) ve günlük (≤365 gün) risk görünümleri
 # Not: Değişken/işlev adlarında kısaltma yok; açıklayıcı yorumlar eklendi.
 
@@ -221,25 +221,58 @@ def coerce_centroid_dataframe(any_df: pd.DataFrame) -> pd.DataFrame | None:
     return standardized.drop_duplicates("geoid")
 
 @st.cache_data(show_spinner=False)
-def load_centroids_optional() -> pd.DataFrame | None:
+def load_centroids_optional(centroid_member_override: str = "", uploaded_file=None) -> pd.DataFrame | None:
+    """Öncelik: 1) kullanıcı yükledi 2) kullanıcı override adı 3) aday listesi."""
+    # 1) Kullanıcının yüklediği dosya
+    if uploaded_file is not None:
+        try:
+            name = uploaded_file.name.lower()
+            if name.endswith(".parquet"):
+                dfu = pd.read_parquet(uploaded_file)
+            else:
+                dfu = pd.read_csv(uploaded_file)
+            coerced = coerce_centroid_dataframe(dfu)
+            if coerced is not None and len(coerced):
+                return coerced
+        except Exception:
+            pass
+
+    # 2) Artifact içi: override adı verilmişse önce onu dene
     try:
         url, headers = resolve_latest_artifact_zip_url(REPOSITORY_OWNER, REPOSITORY_NAME, ARTIFACT_NAME_SHOULD_CONTAIN)
         if not url:
             return None
         response = requests.get(url, headers=headers, timeout=120, allow_redirects=True)
         response.raise_for_status()
-        with zipfile.ZipFile(BytesIO(response.content)) as zip_file:
-            for candidate in CENTROID_FILE_CANDIDATES:
+        from zipfile import ZipFile
+        zbytes = response.content
+        with ZipFile(BytesIO(zbytes)) as z:
+            # override adı
+            if centroid_member_override:
                 try:
-                    with zip_file.open(candidate) as file_obj:
-                        raw_bytes = file_obj.read()
+                    with z.open(centroid_member_override) as f:
+                        b = f.read()
                     try:
-                        centroid_df = pd.read_parquet(BytesIO(raw_bytes))
+                        cdf = pd.read_parquet(BytesIO(b))
                     except Exception:
-                        centroid_df = pd.read_csv(BytesIO(raw_bytes))
-                    standardized = coerce_centroid_dataframe(centroid_df)
-                    if standardized is not None and len(standardized):
-                        return standardized
+                        cdf = pd.read_csv(BytesIO(b))
+                    coerced = coerce_centroid_dataframe(cdf)
+                    if coerced is not None and len(coerced):
+                        return coerced
+                except KeyError:
+                    pass
+            # 3) Adaylar listesi
+            for cand in CENTROID_FILE_CANDIDATES:
+                try:
+                    with z.open(cand) as f:
+                        b = f.read()
+                    try:
+                        cdf = pd.read_parquet(BytesIO(b))
+                    except Exception:
+                        cdf = pd.read_csv(BytesIO(b))
+                    coerced = coerce_centroid_dataframe(cdf)
+                    if coerced is not None and len(coerced):
+                        return coerced
                 except KeyError:
                     continue
         return None
@@ -306,6 +339,27 @@ selected_resolution_mode = st.sidebar.radio(
     index=0,
 )
 
+# ——— Saatlik mod için saat seçimi (tek saat veya saat aralığı) ———
+if selected_resolution_mode.startswith("Saatlik"):
+    hour_mode = st.sidebar.radio("Saat seçimi", ["Tek saat", "Saat aralığı"], index=1)
+    if hour_mode == "Tek saat":
+        selected_hour_single = st.sidebar.slider("Saat", 0, 23, 18)
+        selected_hours = [selected_hour_single]
+    else:
+        start_h, end_h = st.sidebar.select_slider(
+            "Saat aralığı",
+            options=list(range(24)),
+            value=(0, 23)
+        )
+        if start_h <= end_h:
+            selected_hours = list(range(start_h, end_h + 1))
+        else:
+            # gece devreden aralık (örn. 22→03)
+            selected_hours = list(range(start_h, 24)) + list(range(0, end_h + 1))
+else:
+    hour_mode = None
+    selected_hours = []
+
 current_datetime = datetime.now()
 if selected_resolution_mode.startswith("Saatlik"):
     maximum_selectable_days = 7
@@ -332,6 +386,18 @@ if (pd.to_datetime(selected_end_date) - pd.to_datetime(selected_start_date)).day
 geoid_filter_text = st.sidebar.text_input("GEOID filtre (virgülle ayır)", value="")
 selected_geoids = [g.strip() for g in geoid_filter_text.split(",") if g.strip()]
 
+# Centroid override seçenekleri (harita için)
+st.sidebar.divider()
+st.sidebar.caption("🗺️ Harita için centroid kaynak tercihi (opsiyonel)")
+centroid_member_override = st.sidebar.text_input(
+    "Artifact içi centroid dosyası adı",
+    value="",
+    help="Örn: geoid_centroids.parquet / sf_geoid_centroids.csv / sf_crime_grid_full_labeled.csv"
+)
+centroid_file_upload = st.sidebar.file_uploader(
+    "Yerel centroid dosyası yükle (csv/parquet)", type=["csv", "parquet"], accept_multiple_files=False
+)
+
 # Tablo boyutu (Top-K)
 selected_top_k = st.sidebar.slider("Top-K (tablo)", 10, 200, 50, step=10)
 
@@ -346,7 +412,10 @@ with st.spinner("Veriler yükleniyor…"):
         hourly_dataframe = hourly_dataframe[(hourly_dataframe["timestamp"] >= start_ts) & (hourly_dataframe["timestamp"] <= end_ts)].copy()
         if selected_geoids:
             hourly_dataframe = hourly_dataframe[hourly_dataframe["geoid"].isin(selected_geoids)].copy()
-        # Seçilen pencerede GEOID bazında ortalama risk
+        # Saat filtresi
+        if selected_hours:
+            hourly_dataframe = hourly_dataframe[hourly_dataframe["hour"].isin(selected_hours)].copy()
+        # GEOID bazında ortalama risk (tek saat veya saat aralığı; fark etmez)
         aggregated_dataframe = (
             hourly_dataframe.groupby("geoid", as_index=False)["risk_score"].mean().rename(columns={"risk_score": "risk_mean"})
         )
@@ -371,21 +440,71 @@ else:
     aggregated_sorted = aggregated_dataframe
 
 # ------------------------------------------------------------
+# 🗺️ Harita — SAYFANIN EN ÜSTÜNDE
+# ------------------------------------------------------------
+st.subheader("🗺️ Harita — 5 seviye risk renklendirme")
+centroid_dataframe = load_centroids_optional(centroid_member_override, centroid_file_upload)
+if centroid_dataframe is None or len(centroid_dataframe) == 0:
+    st.info("Centroid verisi (geoid→lat/lon) bulunamadı. Harita devre dışı. Sol menüden centroid dosyası seçebilir/yükleyebilirsiniz.")
+else:
+    map_dataframe = aggregated_dataframe.copy()
+    if len(map_dataframe):
+        map_dataframe["risk_bucket"] = map_dataframe["risk_mean"].map(map_value_to_risk_bucket)
+        map_dataframe = map_dataframe.merge(centroid_dataframe, on="geoid", how="left").dropna(subset=["lat", "lon"]).copy()
+    if len(map_dataframe) == 0:
+        st.info("Harita için geçerli nokta yok (lat/lon eşleşmedi).")
+    else:
+        map_dataframe = map_dataframe.sort_values("risk_mean", ascending=False)
+        map_dataframe["color"] = map_dataframe["risk_bucket"].map(RISK_BUCKET_COLORS_RGBA)
+        legend_markdown = (
+            "**Lejand:** "
+            "<span style='background:#ddd;padding:2px 6px;border-radius:4px;'>Çok Düşük</span> "
+            "<span style='background:#b4d2ff;padding:2px 6px;border-radius:4px;'>Düşük</span> "
+            "<span style='background:#ffdc82;padding:2px 6px;border-radius:4px;'>Orta</span> "
+            "<span style='background:#ffaa6e;padding:2px 6px;border-radius:4px;'>Yüksek</span> "
+            "<span style='background:#ff5a5a;padding:2px 6px;border-radius:4px;'>Çok Yüksek</span> "
+        )
+        st.markdown(legend_markdown, unsafe_allow_html=True)
+
+        import pydeck as pdk
+        scatter_layer = pdk.Layer(
+            "ScatterplotLayer",
+            data=map_dataframe,
+            get_position='[lon, lat]',
+            get_fill_color='color',
+            get_radius=80 if selected_resolution_mode.startswith("Saatlik") else 120,
+            pickable=True,
+            radius_min_pixels=2,
+            radius_max_pixels=20,
+            auto_highlight=True,
+        )
+        initial_view_state = pdk.ViewState(
+            latitude=float(map_dataframe["lat"].median()),
+            longitude=float(map_dataframe["lon"].median()),
+            zoom=11,
+        )
+        st.pydeck_chart(pdk.Deck(
+            layers=[scatter_layer],
+            initial_view_state=initial_view_state,
+            tooltip={"text": "GEOID {geoid}\\nRisk {risk_mean:.3f}\\nSeviye {risk_bucket}"},
+        ))
+
+# ------------------------------------------------------------
 # 🧠 Özet kartlar
 # ------------------------------------------------------------
-st.title("🌀 Suç Tahmini — rev3")
-st.caption("Saatlik (≤7 gün) / Günlük (≤365 gün) pencerede GEOID bazlı ortalama risk.")
+st.title("🌀 Suç Tahmini — rev4")
+st.caption("Saatlik (tek saat/saat aralığı ≤7 gün) veya günlük (≤365 gün) pencerede GEOID bazlı ortalama risk.")
 
 summary_col_1, summary_col_2, summary_col_3 = st.columns(3)
 summary_col_1.metric("Kapsanan kayıt", f"{len(data_used_for_views):,}")
-summary_col_2.metric("GEOID sayısı", f"{aggregated_sorted['geoid'].nunique():,}" if len(aggregated_sorted) else "0")
+summary_col_2.metric("GEOID sayısı", f"{aggregated_dataframe['geoid'].nunique():,}" if len(aggregated_dataframe) else "0")
 summary_col_3.metric("Ortalama risk", f"{data_used_for_views['risk_score'].mean():.3f}" if len(data_used_for_views) else "—")
 
 # ------------------------------------------------------------
 # 🔝 Top-K tablo + indir
 # ------------------------------------------------------------
 st.subheader("🔝 Top-K GEOID")
-visible_topk_dataframe = aggregated_sorted.head(selected_top_k).copy()
+visible_topk_dataframe = aggregated_dataframe.sort_values("risk_mean", ascending=False).head(selected_top_k).copy()
 st.dataframe(visible_topk_dataframe, use_container_width=True, height=420)
 st.download_button(
     "⬇️ CSV indir (Top-K)",
@@ -464,16 +583,16 @@ else:
         st.pydeck_chart(pdk.Deck(
             layers=[scatter_layer],
             initial_view_state=initial_view_state,
-            tooltip={
-                "text": "GEOID {geoid}\\nRisk {risk_mean:.3f}\\nSeviye {risk_bucket}"
-            },
+            tooltip={"text": "GEOID {geoid}
+Risk {risk_mean:.3f}
+Seviye {risk_bucket}"},
         ))
+
 # ------------------------------------------------------------
 # 📝 Dipnot
 # ------------------------------------------------------------
 st.caption(
-    "Kaynak: artifact 'sf-crime-parquet' → "
-    "risk_hourly_grid_full_labeled / risk_daily_grid_full_labeled.\n"
+    "Kaynak: artifact 'sf-crime-parquet' → risk_hourly_grid_full_labeled / risk_daily_grid_full_labeled.
+"
     "Harita, artifact içinde geoid→lat/lon eşleşmesi bulunduğu durumda etkinleşir."
 )
-
