@@ -225,50 +225,52 @@ def draw_map(gj: dict):
 # ──────────────────────────────────────────────────────────────────────────────
 # Çalıştır (yalnızca ANLIK hour_range)
 # ──────────────────────────────────────────────────────────────────────────────
-st.title("🕒 Anlık Suç Risk Haritası")
 
-# Token kontrol
+# 1) Token kontrol
 if not os.getenv("GITHUB_TOKEN"):
     st.error("GITHUB_TOKEN ayarlı değil. Secrets veya env üzerinden tanımlayın.")
     st.stop()
 
-# CSV
+# 2) CSV'yi yükle
 try:
     df_all = load_hourly_csv()
 except Exception as e:
     st.error(f"Artifact/CSV okunamadı: {e}")
     st.stop()
 
-# Anlık saat → CSV’deki hour_range
+# 3) CSV’den hour_range etiketleri
 labels = sorted(df_all["hour_range"].dropna().astype(str).unique().tolist())
+if not labels:
+    st.error("CSV’de hour_range etiketi yok.")
+    st.stop()
+
+# 4) SF saatine göre anlık bucket → hr_label → kullanıcı-dili (human)
 tz = ZoneInfo(TARGET_TZ)
 now_sf = datetime.now(tz)
-hr_label = hour_to_bucket(now_sf.hour, labels) or (labels[0] if labels else None)
-if not hr_label:
-    st.error("CSV’de hour_range bulunamadı."); st.stop()
-
+hr_label = hour_to_bucket(now_sf.hour, labels) or labels[0]
 human = hr_label_to_human(hr_label)
 
+# 5) Başlık + açıklama
+st.title("🕒 Anlık Suç Risk Haritası")
 st.caption(
     f"Bu harita şu anki saat aralığı (**{human}**) için model tarafından tahmin edilen suç riskini gösterir.\n\n"
     "Başka bir güne/saate ait tahmin görmek isterseniz → **Suç Tahmini** sekmesini kullanın."
 )
-
 st.caption(f"SF saati: **{now_sf:%Y-%m-%d %H:%M}** — gösterilen dilim: **{human}**")
 
-# Filtre
+# 6) Yalnızca anlık dilimi filtrele
 df_hr = df_all[df_all["hour_range"].astype(str) == hr_label].copy()
 
-# Küçük özet
+# 7) Küçük özet
 c1, c2, c3 = st.columns(3)
 c1.metric("GEOID sayısı", f"{df_hr['geoid'].nunique():,}")
 c2.metric("Risk medyanı", f"{df_hr['risk_score'].median():.3f}" if not df_hr.empty else "—")
 c3.metric("Maks skor", f"{df_hr['risk_score'].max():.3f}" if not df_hr.empty else "—")
 
-# GeoJSON → enrich → çiz
+# 8) GeoJSON → enrich → harita
 gj = load_geojson()
 gj_enriched = enrich_geojson(gj, df_hr)
 draw_map(gj_enriched)
 
-# Alt rozet
+# 9) Alt rozet
 show_last_update_badge(data_upto=None, model_version=MODEL_VERSION, last_train=MODEL_LAST_TRAIN)
