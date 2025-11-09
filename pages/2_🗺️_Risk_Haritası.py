@@ -28,7 +28,7 @@ GEOJSON_LOCAL = "data/sf_cells.geojson"               # yerel dosya (varsa)
 # ──────────────────────────────────────────────────────────────────────────────
 def gh_headers() -> dict:
     hdrs = {"Accept": "application/vnd.github+json"}
-    tok = os.getenv("GITHUB_TOKEN")
+    tok = os.getenv("GH_TOKEN")
     if tok:
         hdrs["Authorization"] = f"Bearer {tok}"
     return hdrs
@@ -233,8 +233,8 @@ st.caption(
 )
 
 # Token kontrol
-if not os.getenv("GITHUB_TOKEN"):
-    st.error("GITHUB_TOKEN ayarlı değil. Secrets veya env üzerinden tanımlayın.")
+if not os.getenv("GH_TOKEN"):
+    st.error("GH_TOKEN ayarlı değil. Secrets veya env üzerinden tanımlayın.")
     st.stop()
 
 # CSV yükle
