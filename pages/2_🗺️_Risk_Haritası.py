@@ -179,6 +179,15 @@ def enrich_geojson(gj: dict, df: pd.DataFrame) -> dict:
         feats_out.append({**feat, "properties": props})
     return {**gj, "features": feats_out}
 
+def hr_label_to_human(lab: str) -> str:
+    # "3-6" → "03:00-05:59"
+    if not lab or "-" not in lab: return lab
+    a,b = lab.split("-",1)
+    s = int(a.strip())
+    e = int(b.strip())
+    end_h = e-1 if e>0 else 23
+    return f"{s:02d}:00-{end_h:02d}:59"
+
 def draw_map(gj: dict):
     layer = pdk.Layer(
         "GeoJsonLayer",
@@ -241,7 +250,15 @@ hr_label = hour_to_bucket(now_sf.hour, labels) or (labels[0] if labels else None
 if not hr_label:
     st.error("CSV’de hour_range bulunamadı."); st.stop()
 
-st.caption(f"SF saati: **{now_sf:%Y-%m-%d %H:%M}** — gösterilen dilim: **{hr_label}**")
+human = hr_label_to_human(hr_label)
+
+st.title("🕒 Şu Anki Saat Dilimi İçin Risk Haritası")
+st.caption(
+    f"Bu harita şu anki saat aralığı (**{human}**) için model tarafından tahmin edilen suç riskini gösterir.\n\n"
+    "Başka bir güne/saate ait tahmin görmek isterseniz → **Suç Tahmini** sekmesini kullanın."
+)
+
+st.caption(f"SF saati: **{now_sf:%Y-%m-%d %H:%M}** — gösterilen dilim: **{human}**")
 
 # Filtre
 df_hr = df_all[df_all["hour_range"].astype(str) == hr_label].copy()
