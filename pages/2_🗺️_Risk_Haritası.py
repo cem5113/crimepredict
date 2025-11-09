@@ -229,8 +229,7 @@ def draw_map(gj: dict):
 st.title("🕒 Anlık Suç Risk Haritası")
 
 st.caption(
-    f"Bu harita anlık tahmin edilen suç riskini gösterir.\n\n"
-    "Başka bir güne/saate ait tahmin görmek isterseniz → **Suç Tahmini** sekmesini kullanın."
+    f"Bu harita anlık tahmin edilen suç riskini gösterir. Başka bir güne/saate ait tahmin görmek isterseniz → **Suç Tahmini** sekmesini kullanın."
 )
 
 # Token kontrol
