@@ -1,6 +1,6 @@
 # 3_🧭_Suç_Tahmini — Haritalı görünüm (GEOID + centroid)
-# Saatlik (≤7 gün; tek saat / saat aralığı) ve Günlük (≤365 gün) risk görünümleri
-# Kaynak: artifact 'sf-crime-parquet' → risk_hourly_grid_full_labeled / risk_daily_grid_full_labeled
+# Saatlik (≤24 saat; tek saat / saat aralığı) ve Günlük (≤365 gün) risk görünümleri
+# Kaynak: artifact 'fr-crime-outputs-parquet' → risk_hourly_next24h_top3 / risk_daily_next365d_top5
 # Not: Harita için centroid yalnızca artifact içindeki adaylardan bulunur (upload yok).
 
 import os
@@ -20,11 +20,11 @@ import streamlit as st
 # ------------------------------------------------------------
 REPOSITORY_OWNER = "cem5113"
 REPOSITORY_NAME  = "crime_prediction_data"
-ARTIFACT_NAME_SHOULD_CONTAIN = "sf-crime-parquet"  # Artifact adında bu ifade geçmeli
+ARTIFACT_NAME_SHOULD_CONTAIN = "fr-crime-outputs-parquet"  # FR risk çıktıları artifact'i
 
-# Artifact içindeki beklenen dosyalar
-ARTIFACT_MEMBER_HOURLY = "risk_hourly_grid_full_labeled.parquet"   # parquet yoksa .csv denenir
-ARTIFACT_MEMBER_DAILY  = "risk_daily_grid_full_labeled.parquet"    # parquet yoksa .csv denenir
+# Artifact içindeki beklenen dosyalar (FR pipeline risk çıktıları)
+ARTIFACT_MEMBER_HOURLY = "risk_hourly_next24h_top3.parquet"    # parquet yoksa .csv denenir
+ARTIFACT_MEMBER_DAILY  = "risk_daily_next365d_top5.parquet"    # parquet yoksa .csv denenir
 
 # Centroid için otomatik adaylar (artifact içinde aranır)
 CENTROID_FILE_CANDIDATES = [
@@ -426,6 +426,6 @@ else:
 # 🧾 Dipnot
 # ------------------------------------------------------------
 st.caption(
-    "Kaynak: artifact 'sf-crime-parquet' → risk_hourly_grid_full_labeled / risk_daily_grid_full_labeled. "
-    "Harita, centroid (geoid→lat/lon) artifact içinde bulunursa otomatik etkinleşir."
+    "Kaynak: artifact 'fr-crime-outputs-parquet' → risk_hourly_next24h_top3 / risk_daily_next365d_top5 (parquet). "
+    "Harita, centroid (GEOID→lat/lon) dosyası artifact içinde bulunursa otomatik etkinleşir."
 )
