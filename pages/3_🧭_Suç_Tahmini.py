@@ -8,7 +8,12 @@ import io
 import posixpath
 import zipfile
 from io import BytesIO
+
 from datetime import datetime, timedelta
+try:
+    from zoneinfo import ZoneInfo 
+except Exception:
+    ZoneInfo = None 
 
 import requests
 import pandas as pd
@@ -254,15 +259,52 @@ st.sidebar.header("⚙️ Ayarlar")
 # Zaman modu
 mode = st.sidebar.radio("Zaman çözünürlüğü", ["Saatlik (≤7 gün)", "Günlük (≤365 gün)"], index=0)
 
-# Saatlik modda saat seçimi
+# Saatlik modda SADECE saat aralığı seçimi
+def default_hour_block_label(hour_blocks: dict) -> str:
+    """
+    San Francisco yerel saatine göre şu an hangi blok içindeysek
+    o blok etiketini döndürür. Hata olursa '18–21' fallback.
+    """
+    fallback = "18–21"
+    try:
+        if ZoneInfo is None:
+            raise RuntimeError("ZoneInfo yok")
+        now_sf = datetime.now(ZoneInfo("America/Los_Angeles"))
+        h = now_sf.hour  # 0–23
+        for label, (h0, h1) in hour_blocks.items():
+            if h0 <= h <= h1:
+                return label
+        return fallback
+    except Exception:
+        return fallback
+
 if mode.startswith("Saatlik"):
-    hour_mode = st.sidebar.radio("Saat seçimi", ["Tek saat", "Saat aralığı"], index=1)
-    if hour_mode == "Tek saat":
-        hour_single = st.sidebar.slider("Saat", 0, 23, 18)
-        selected_hours = [hour_single]
-    else:
-        h0, h1 = st.sidebar.select_slider("Saat aralığı", options=list(range(24)), value=(8,23))
-        selected_hours = list(range(h0, h1+1)) if h0 <= h1 else list(range(h0,24))+list(range(0,h1+1))
+    st.sidebar.subheader("Saat Aralığı")
+    
+    # 3 saatlik bloklar (istersen değiştirilebilir: 2-4-6 saat)
+    hour_blocks = {
+        "00–03": (0, 2),
+        "03–06": (3, 5),
+        "06–09": (6, 8),
+        "09–12": (9,11),
+        "12–15": (12,14),
+        "15–18": (15,17),
+        "18–21": (18,20),
+        "21–24": (21,23),
+    }
+
+    # Varsayılan: San Francisco'da şu an hangi bloksa o
+    default_label = default_hour_block_label(hour_blocks)
+
+    selected_label = st.sidebar.select_slider(
+        "Saat aralığı",
+        options=list(hour_blocks.keys()),
+        value=default_label,
+    )
+
+    h0, h1 = hour_blocks[selected_label]
+    selected_hours = list(range(h0, h1+1))
+
 else:
     selected_hours = []
 
