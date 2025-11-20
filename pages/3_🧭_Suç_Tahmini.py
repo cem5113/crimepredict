@@ -88,15 +88,17 @@ def resolve_latest_artifact_zip_url(owner: str, repo: str, name_contains: str):
 # ------------------------------------------------------------
 def read_member_from_zip_bytes(zip_bytes: bytes, member_path: str) -> pd.DataFrame:
     """
-    ZIP içinden verilen gövde ismine sahip dosyayı (uzantı .parquet / .csv fark etmez)
-    bulup okur.
+    ZIP içinden verilen gövde ismini İÇEREN ilk dosyayı (parquet/csv) bulup okur.
+    Örn: member_path="risk_hourly_next24h_top3" ise
+          fr_parquet_outputs/risk_hourly_next24h_top3.parquet
+          veya .csv, .parquet.snappy vb. hepsini yakalar.
     """
     def read_any_table(raw_bytes: bytes, name_hint: str) -> pd.DataFrame:
         buf = BytesIO(raw_bytes)
         name_l = name_hint.lower()
         if name_l.endswith(".csv"):
             return pd.read_csv(buf)
-        # Önce parquet dene, hata alırsak csv'ye dön
+        # Önce parquet dene, olmazsa csv oku
         try:
             buf.seek(0)
             return pd.read_parquet(buf)
@@ -107,22 +109,22 @@ def read_member_from_zip_bytes(zip_bytes: bytes, member_path: str) -> pd.DataFra
     with zipfile.ZipFile(BytesIO(zip_bytes)) as z:
         names = z.namelist()
 
-        base = posixpath.basename(member_path)  # örn: "risk_hourly_next24h_top3"
-        # Gövde (uzantısız)
-        stem = base.split(".")[0]
+        base  = posixpath.basename(member_path)          # "risk_hourly_next24h_top3"
+        stem  = base.split(".")[0]                       # "risk_hourly_next24h_top3"
+        stemL = stem.lower()
 
-        # 1) Tam eşleşme: isim veya klasör/isim
+        # 1) İSMİNİDE STEM GEÇEN İLK DOSYA (case-insensitive)
         for n in names:
             bn = posixpath.basename(n)
-            if bn == base or bn == stem or bn.startswith(stem + "."):
+            if stemL in bn.lower():
                 with z.open(n) as f:
                     return read_any_table(f.read(), bn)
 
-    # Hiçbir eşleşme yoksa
+    # Hiçbir eşleşme yoksa:
     raise FileNotFoundError(
-        f"ZIP içinde '{member_path}' gövdesine sahip bir CSV/PARQUET dosyası bulunamadı."
+        f"ZIP içinde '{member_path}' gövdesini içeren bir CSV/PARQUET dosyası bulunamadı."
     )
-
+    
 @st.cache_data(show_spinner=False)
 def load_artifact_member(member: str) -> pd.DataFrame:
     url, headers = resolve_latest_artifact_zip_url(REPOSITORY_OWNER, REPOSITORY_NAME, ARTIFACT_NAME_SHOULD_CONTAIN)
