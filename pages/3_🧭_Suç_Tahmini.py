@@ -327,6 +327,32 @@ geoids_sel = [g.strip() for g in geof_txt.split(",") if g.strip()]
 top_k = st.sidebar.slider("Top-K (tablo)", 10, 200, 50, step=10)
 
 # ------------------------------------------------------------
+# 🔎 DEBUG — Artifact ZIP içindeki dosya isimlerini göster
+# ------------------------------------------------------------
+with st.expander("🔎 Artifact içindeki dosya isimleri (debug)", expanded=False):
+    try:
+        url, headers = resolve_latest_artifact_zip_url(
+            REPOSITORY_OWNER, REPOSITORY_NAME, ARTIFACT_NAME_SHOULD_CONTAIN
+        )
+        if url:
+            r = requests.get(url, headers=headers, timeout=60)
+            r.raise_for_status()
+            with zipfile.ZipFile(BytesIO(r.content)) as z:
+                names = z.namelist()
+            st.write(f"Toplam dosya: {len(names)}")
+            st.write(names)   # ZIP içindeki tüm dosya yolları
+        else:
+            st.warning("Artifact bulunamadı veya token eksik.")
+    except Exception as e:
+        st.error(f"Debug sırasında hata: {e}")
+
+if len(agg):
+    agg["risk_bucket"] = agg["risk_mean"].map(bucket_of)
+    agg_sorted = agg.sort_values("risk_mean", ascending=False).reset_index(drop=True)
+else:
+    agg_sorted = agg
+    
+# ------------------------------------------------------------
 # 📥 Veri yükleme ve filtre
 # ------------------------------------------------------------
 @st.cache_data(show_spinner=False)
@@ -354,32 +380,6 @@ with st.spinner("Veriler yükleniyor…"):
         if geoids_sel: df = df[df["geoid"].isin(geoids_sel)].copy()
         agg = df.groupby("geoid", as_index=False)["risk_score"].mean().rename(columns={"risk_score":"risk_mean"})
         view_df = df; time_col = "date"
-
-# ------------------------------------------------------------
-# 🔎 DEBUG — Artifact ZIP içindeki dosya isimlerini göster
-# ------------------------------------------------------------
-with st.expander("🔎 Artifact içindeki dosya isimleri (debug)", expanded=False):
-    try:
-        url, headers = resolve_latest_artifact_zip_url(
-            REPOSITORY_OWNER, REPOSITORY_NAME, ARTIFACT_NAME_SHOULD_CONTAIN
-        )
-        if url:
-            r = requests.get(url, headers=headers, timeout=60)
-            r.raise_for_status()
-            with zipfile.ZipFile(BytesIO(r.content)) as z:
-                names = z.namelist()
-            st.write(f"Toplam dosya: {len(names)}")
-            st.write(names)   # ZIP içindeki tüm dosya yolları
-        else:
-            st.warning("Artifact bulunamadı veya token eksik.")
-    except Exception as e:
-        st.error(f"Debug sırasında hata: {e}")
-
-if len(agg):
-    agg["risk_bucket"] = agg["risk_mean"].map(bucket_of)
-    agg_sorted = agg.sort_values("risk_mean", ascending=False).reset_index(drop=True)
-else:
-    agg_sorted = agg
 
 # ------------------------------------------------------------
 # 🗺️ HARİTA — EN ÜSTE
