@@ -28,8 +28,8 @@ REPOSITORY_NAME  = "crime_prediction_data"
 ARTIFACT_NAME_SHOULD_CONTAIN = "fr-crime-outputs-parquet"  # FR risk çıktıları artifact'i
 
 # Artifact içindeki beklenen dosyalar (FR pipeline risk çıktıları)
-ARTIFACT_MEMBER_HOURLY = "risk_hourly_next24h_top3.parquet"    # parquet yoksa .csv denenir
-ARTIFACT_MEMBER_DAILY  = "risk_daily_next365d_top5.parquet"    # parquet yoksa .csv denenir
+ARTIFACT_MEMBER_HOURLY = "risk_hourly_next24h_top3"    # parquet yoksa .csv denenir
+ARTIFACT_MEMBER_DAILY  = "risk_daily_next365d_top5"    # parquet yoksa .csv denenir
 
 # Centroid için otomatik adaylar (artifact içinde aranır)
 CENTROID_FILE_CANDIDATES = [
@@ -87,10 +87,16 @@ def resolve_latest_artifact_zip_url(owner: str, repo: str, name_contains: str):
 # 🧰 ZIP içinden üye okuma (parquet→csv fallback)
 # ------------------------------------------------------------
 def read_member_from_zip_bytes(zip_bytes: bytes, member_path: str) -> pd.DataFrame:
+    """
+    ZIP içinden verilen gövde ismine sahip dosyayı (uzantı .parquet / .csv fark etmez)
+    bulup okur.
+    """
     def read_any_table(raw_bytes: bytes, name_hint: str) -> pd.DataFrame:
         buf = BytesIO(raw_bytes)
-        if name_hint.lower().endswith(".csv"):
+        name_l = name_hint.lower()
+        if name_l.endswith(".csv"):
             return pd.read_csv(buf)
+        # Önce parquet dene, hata alırsak csv'ye dön
         try:
             buf.seek(0)
             return pd.read_parquet(buf)
@@ -101,40 +107,20 @@ def read_member_from_zip_bytes(zip_bytes: bytes, member_path: str) -> pd.DataFra
     with zipfile.ZipFile(BytesIO(zip_bytes)) as z:
         names = z.namelist()
 
-        # 1) Tam yol ile eşleşme
-        if member_path in names:
-            with z.open(member_path) as f:
-                return read_any_table(f.read(), member_path)
+        base = posixpath.basename(member_path)  # örn: "risk_hourly_next24h_top3"
+        # Gövde (uzantısız)
+        stem = base.split(".")[0]
 
-        # 2) Sadece dosya adı (basename) ile eşleşme
-        base = posixpath.basename(member_path)
+        # 1) Tam eşleşme: isim veya klasör/isim
         for n in names:
-            if n.endswith("/" + base) or n == base:
+            bn = posixpath.basename(n)
+            if bn == base or bn == stem or bn.startswith(stem + "."):
                 with z.open(n) as f:
-                    return read_any_table(f.read(), n)
+                    return read_any_table(f.read(), bn)
 
-        # 3) parquet <-> csv alternatifi sadece gerçekten varsa dene
-        alt = None
-        if member_path.lower().endswith(".parquet"):
-            alt = member_path[:-8] + ".csv"
-        elif member_path.lower().endswith(".csv"):
-            alt = member_path[:-4] + ".parquet"
-
-        if alt:
-            base_alt = posixpath.basename(alt)
-            # önce tam yol bak
-            if alt in names:
-                with z.open(alt) as f:
-                    return read_any_table(f.read(), alt)
-            # sonra basename ile ara
-            for n in names:
-                if n.endswith("/" + base_alt) or n == base_alt:
-                    with z.open(n) as f:
-                        return read_any_table(f.read(), n)
-
-    # Hiçbir versiyon bulunamadıysa:
+    # Hiçbir eşleşme yoksa
     raise FileNotFoundError(
-        f"ZIP içinde '{member_path}' ya da CSV/PARQUET alternatifi bulunamadı."
+        f"ZIP içinde '{member_path}' gövdesine sahip bir CSV/PARQUET dosyası bulunamadı."
     )
 
 @st.cache_data(show_spinner=False)
