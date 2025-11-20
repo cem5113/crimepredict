@@ -395,11 +395,24 @@ else:
 now = datetime.now()
 max_days = 7 if mode.startswith("Saatlik") else 365
 st.sidebar.caption(f"{'Saatlik' if max_days == 7 else 'Günlük'} görünümde en fazla {max_days} gün seçebilirsiniz.")
-d_start = st.sidebar.date_input("Başlangıç tarihi", value=(now - timedelta(days=1)).date())
-d_end   = st.sidebar.date_input("Bitiş tarihi",     value=now.date())
+
+# 🔁 MOD: Saatlik ve Günlük mod için farklı varsayılan tarih aralığı
+if mode.startswith("Saatlik"):
+    # Saatlik görünüm: dün–bugün (eski davranış korunuyor)
+    d_start_default = (now - timedelta(days=1)).date()
+    d_end_default   = now.date()
+else:
+    # Günlük (365 gün) görünüm: sadece "bugün"
+    d_start_default = now.date()
+    d_end_default   = now.date()
+
+d_start = st.sidebar.date_input("Başlangıç tarihi", value=d_start_default)
+d_end   = st.sidebar.date_input("Bitiş tarihi",     value=d_end_default)
+
 if (pd.to_datetime(d_end) - pd.to_datetime(d_start)).days > max_days:
     d_end = (pd.to_datetime(d_start) + pd.Timedelta(days=max_days)).date()
     st.sidebar.warning(f"Seçim {max_days} günü aşamaz; bitiş {d_end} olarak güncellendi.")
+
 
 # GEOID filtre
 geof_txt = st.sidebar.text_input("GEOID filtre (virgülle ayır)", value="")
@@ -685,8 +698,19 @@ with tab1:
         if len(df_sel) == 0:
             st.info("Seçili GEOID için veri yok.")
         else:
-            latest = df_sel.iloc[-1]
-
+            # 🔁 MOD: Günlük (365 gün) modunda mümkünse "bugün" satırını kullan
+            if time_col == "date":
+                today_dt = pd.to_datetime(datetime.now().date())
+                mask_today = df_sel[time_col] == today_dt
+                if mask_today.any():
+                    latest = df_sel[mask_today].iloc[0]
+                else:
+                    # Bugün yoksa, eski davranış: en son satır
+                    latest = df_sel.iloc[-1]
+            else:
+                # Saatlik modda olduğu gibi son satırı kullan
+                latest = df_sel.iloc[-1]
+        
             def gv(col, default="—"):
                 return latest[col] if col in df_sel.columns and pd.notna(latest[col]) else default
 
