@@ -84,21 +84,22 @@ def resolve_latest_artifact_zip_url(owner: str, repo: str, name_contains: str):
     return url, github_api_headers()
 
 # ------------------------------------------------------------
-# 🧰 ZIP içinden üye okuma (parquet→csv fallback)
+# 🧰 ZIP içinden üye okuma (nested zip + parquet/csv fallback)
 # ------------------------------------------------------------
 def read_member_from_zip_bytes(zip_bytes: bytes, member_path: str) -> pd.DataFrame:
     """
-    ZIP içinden verilen gövde ismini İÇEREN ilk dosyayı (parquet/csv) bulup okur.
-    Örn: member_path="risk_hourly_next24h_top3" ise
-          fr_parquet_outputs/risk_hourly_next24h_top3.parquet
-          veya .csv, .parquet.snappy vb. hepsini yakalar.
+    Artifact ZIP'inde:
+      - önce doğrudan dosyayı arar
+      - yoksa içerdeki .zip (örn. fr_parquet_outputs.zip) dosyalarını açıp orada arar
+    member_path: "risk_hourly_next24h_top3" gibi gövde adı
     """
+
     def read_any_table(raw_bytes: bytes, name_hint: str) -> pd.DataFrame:
         buf = BytesIO(raw_bytes)
         name_l = name_hint.lower()
         if name_l.endswith(".csv"):
             return pd.read_csv(buf)
-        # Önce parquet dene, olmazsa csv oku
+        # Önce parquet dene, hata olursa csv'e düş
         try:
             buf.seek(0)
             return pd.read_parquet(buf)
@@ -106,34 +107,46 @@ def read_member_from_zip_bytes(zip_bytes: bytes, member_path: str) -> pd.DataFra
             buf.seek(0)
             return pd.read_csv(buf)
 
-    with zipfile.ZipFile(BytesIO(zip_bytes)) as z:
-        names = z.namelist()
-
-        base  = posixpath.basename(member_path)          # "risk_hourly_next24h_top3"
-        stem  = base.split(".")[0]                       # "risk_hourly_next24h_top3"
+    def scan_zip(zf: zipfile.ZipFile, member_path: str) -> pd.DataFrame | None:
+        """Verilen ZipFile içinde stem'i geçen ilk dosyayı bulup DataFrame döndürür."""
+        names = zf.namelist()
+        base  = posixpath.basename(member_path)
+        stem  = base.split(".")[0]
         stemL = stem.lower()
 
-        # 1) İSMİNİDE STEM GEÇEN İLK DOSYA (case-insensitive)
         for n in names:
             bn = posixpath.basename(n)
             if stemL in bn.lower():
-                with z.open(n) as f:
+                with zf.open(n) as f:
                     return read_any_table(f.read(), bn)
+        return None
 
-    # Hiçbir eşleşme yoksa:
+    # 1) Dış ZIP'i aç
+    with zipfile.ZipFile(BytesIO(zip_bytes)) as outer:
+        # Önce dış zip içinde ara
+        df = scan_zip(outer, member_path)
+        if df is not None:
+            return df
+
+        # 2) Bulunamazsa: içerdeki .zip dosyalarını sırayla dene
+        for name in outer.namelist():
+            if name.lower().endswith(".zip"):
+                with outer.open(name) as f_z:
+                    inner_bytes = f_z.read()
+                try:
+                    with zipfile.ZipFile(BytesIO(inner_bytes)) as inner:
+                        df_inner = scan_zip(inner, member_path)
+                        if df_inner is not None:
+                            return df_inner
+                except zipfile.BadZipFile:
+                    # İçerik zip değilse geç
+                    continue
+
+    # Hiçbir eşleşme bulunamadıysa:
     raise FileNotFoundError(
         f"ZIP içinde '{member_path}' gövdesini içeren bir CSV/PARQUET dosyası bulunamadı."
     )
     
-@st.cache_data(show_spinner=False)
-def load_artifact_member(member: str) -> pd.DataFrame:
-    url, headers = resolve_latest_artifact_zip_url(REPOSITORY_OWNER, REPOSITORY_NAME, ARTIFACT_NAME_SHOULD_CONTAIN)
-    if not url:
-        raise RuntimeError("Artifact bulunamadı veya GITHUB_TOKEN yok.")
-    r = requests.get(url, headers=headers, timeout=120, allow_redirects=True)
-    r.raise_for_status()
-    return read_member_from_zip_bytes(r.content, member)
-
 # ------------------------------------------------------------
 # 🧭 Şema doğrulayıcılar (hourly/daily)
 # ------------------------------------------------------------
@@ -325,6 +338,10 @@ geoids_sel = [g.strip() for g in geof_txt.split(",") if g.strip()]
 
 # Top-K (tablo)
 top_k = st.sidebar.slider("Top-K (tablo)", 10, 200, 50, step=10)
+
+agg = pd.DataFrame()
+view_df = pd.DataFrame()
+time_col = "timestamp"
 
 # ------------------------------------------------------------
 # 🔎 DEBUG — Artifact ZIP içindeki dosya isimlerini göster
