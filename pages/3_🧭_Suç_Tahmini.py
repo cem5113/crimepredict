@@ -5,6 +5,7 @@
 
 import os
 import io
+import json
 import posixpath
 import zipfile
 from io import BytesIO
@@ -19,6 +20,7 @@ import requests
 import pandas as pd
 import numpy as np
 import streamlit as st
+import pydeck as pdk
 
 # ------------------------------------------------------------
 # ⚙️ GitHub repo ve artifact bilgisi
@@ -31,16 +33,8 @@ ARTIFACT_NAME_SHOULD_CONTAIN = "fr-crime-outputs-parquet"  # FR risk çıktılar
 ARTIFACT_MEMBER_HOURLY = "risk_hourly_next24h_top3"
 ARTIFACT_MEMBER_DAILY  = "risk_daily_next365d_top5"
 
-# Centroid için otomatik adaylar (artifact içinde aranır)
-CENTROID_FILE_CANDIDATES = [
-    "geoid_centroids.parquet",
-    "sf_geoid_centroids.parquet",
-    "geoid_centroids.csv",
-    "sf_geoid_centroids.csv",
-    # grid dosyasında lat/lon varsa onu da dener
-    "sf_crime_grid_full_labeled.parquet",
-    "sf_crime_grid_full_labeled.csv",
-]
+# Yerel GeoJSON (2_🗺️_Risk_Haritası.py ile aynı)
+GEOJSON_LOCAL = "data/sf_cells.geojson"
 
 # ------------------------------------------------------------
 # 🔑 Token / Header
@@ -262,90 +256,110 @@ def normalize_geoid_for_map(df: pd.DataFrame) -> pd.DataFrame:
         df.loc[mask_city, "geoid"] = "0"
 
     return df
-
+    
 # ------------------------------------------------------------
-# 🗺️ Centroid yükleyici (yalnızca artifact içi otomatik arama)
+# 🗺️ GeoJSON yükleyici & özellik zenginleştirme
 # ------------------------------------------------------------
-def coerce_centroids(any_df: pd.DataFrame) -> pd.DataFrame | None:
-    cols = {c.lower(): c for c in any_df.columns}
-
-    def pick(*names):
-        for n in names:
-            if n in any_df.columns:
-                return n
-            if n.lower() in cols:
-                return cols[n.lower()]
-        return None
-
-    c_geoid = pick("geoid", "GEOID", "cell_id", "id")
-    c_lat   = pick("lat", "latitude", "y")
-    c_lon   = pick("lon", "lng", "longitude", "x")
-    if not (c_geoid and c_lat and c_lon):
-        return None
-    out = pd.DataFrame({
-        "geoid": any_df[c_geoid].astype(str),
-        "lat": pd.to_numeric(any_df[c_lat], errors="coerce"),
-        "lon": pd.to_numeric(any_df[c_lon], errors="coerce"),
-    }).dropna(subset=["lat", "lon"]).copy()
-    return out.drop_duplicates("geoid")
-
 @st.cache_data(show_spinner=False)
-def load_centroids_from_artifact() -> pd.DataFrame | None:
+def load_geojson() -> dict:
     """
-    Artifact ZIP'i içinden centroidleri yükler.
-
-    Önce doğrudan:
-        geoid_centroids
-        sf_geoid_centroids
-    sonra fallback olarak:
-        sf_crime_grid_full_labeled
-
-    isimli dosyaların *stem*'ini kullanır, yani zip içindeki
-    klasör yapısı ve .csv/.parquet uzantısı fark etmez.
+    Yerel sf_cells.geojson dosyasını okur.
+    2_🗺️_Risk_Haritası.py ile aynı mantık.
     """
-    try:
-        url, headers = resolve_latest_artifact_zip_url(
-            REPOSITORY_OWNER, REPOSITORY_NAME, ARTIFACT_NAME_SHOULD_CONTAIN
-        )
-        if not url:
-            return None
+    if os.path.exists(GEOJSON_LOCAL):
+        with open(GEOJSON_LOCAL, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
 
-        resp = requests.get(url, headers=headers, timeout=120, allow_redirects=True)
-        resp.raise_for_status()
-        zip_bytes = resp.content
+def _digits11(x) -> str:
+    """
+    GeoJSON properties içindeki GEOID adayını 11 haneye zorlar.
+    """
+    s = "".join(ch for ch in str(x) if ch.isdigit())
+    return s.zfill(11) if s else ""
 
-        # Önce net centroid dosyalarını dene
-        centroid_stems = [
-            "geoid_centroids",
-            "sf_geoid_centroids",
-        ]
+def enrich_geojson_with_risk(gj: dict, agg_df: pd.DataFrame) -> dict:
+    """
+    sf_cells.geojson içindeki her hücreye:
+      - risk_mean
+      - risk_bucket
+      - expected_count (varsa)
+      - top1_category (varsa)
+    gibi özet bilgileri yazar ve fill_color atar.
+    """
+    if not gj or agg_df is None or agg_df.empty:
+        return gj
 
-        for stem in centroid_stems:
+    agg_df = agg_df.copy()
+    # GEOID'ler zaten normalize_geoid_for_map ile gelmiş olmalı
+    agg_df["geoid"] = agg_df["geoid"].astype(str)
+    risk_map = agg_df.set_index("geoid")
+
+    feats_out = []
+    for feat in gj.get("features", []):
+        props = dict(feat.get("properties") or {})
+
+        # GeoJSON içinden GEOID adayı bul
+        raw = None
+        for k in ("geoid", "GEOID", "cell_id", "id", "geoid11", "geoid_11"):
+            if k in props:
+                raw = props[k]
+                break
+        if raw is None:
+            for k, v in props.items():
+                if "geoid" in str(k).lower():
+                    raw = v
+                    break
+
+        key = _digits11(raw)
+        props["display_id"] = str(raw) if raw not in (None, "") else key
+
+        # Varsayılan boş değerler
+        props.setdefault("risk_mean_txt", "")
+        props.setdefault("risk_bucket", "")
+        props.setdefault("expected_count_txt", "")
+        props.setdefault("top1_category", "")
+        props.setdefault("fill_color", [220, 220, 220, 160])  # Çok düşük default
+
+        if key and key in risk_map.index:
+            row = risk_map.loc[key]
+
+            # Risk bucket ve renk
+            bucket = row.get("risk_bucket", "")
+            if not bucket and "risk_mean" in row:
+                bucket = bucket_of(row["risk_mean"])
+            props["risk_bucket"] = str(bucket)
+
+            color = COLOR_MAP.get(bucket, [220, 220, 220, 160])
+            props["fill_color"] = color
+
+            # Ortalama risk
             try:
-                dfm = read_member_from_zip_bytes(zip_bytes, stem)
-                c = coerce_centroids(dfm)
-                if c is not None and len(c):
-                    return c
-            except FileNotFoundError:
-                continue
+                r = float(row.get("risk_mean", np.nan))
+                if r == r:
+                    props["risk_mean_txt"] = f"{min(max(r, 0.0), 0.999):.3f}"
+            except Exception:
+                pass
 
-        # Fallback: grid dosyasında lat/lon varsa oradan centroid üret
-        grid_stems = [
-            "sf_crime_grid_full_labeled",
-        ]
-        for stem in grid_stems:
-            try:
-                dfm = read_member_from_zip_bytes(zip_bytes, stem)
-                c = coerce_centroids(dfm)
-                if c is not None and len(c):
-                    return c
-            except FileNotFoundError:
-                continue
+            # Beklenen suç (gün/saat başı)
+            def f3(x):
+                try:
+                    return f"{float(x):.3f}"
+                except Exception:
+                    return ""
 
-        return None
+            if "expected_crimes" in row.index:
+                props["expected_count_txt"] = f3(row["expected_crimes"])
+            elif "expected_count" in row.index:
+                props["expected_count_txt"] = f3(row["expected_count"])
 
-    except Exception:
-        return None
+            # En olası suç türü
+            if "top1_category" in row.index:
+                props["top1_category"] = str(row["top1_category"] or "")
+
+        feats_out.append({**feat, "properties": props})
+
+    return {**gj, "features": feats_out}
 
 # ------------------------------------------------------------
 # 🧮 Risk bucket (sabit eşikler)
@@ -600,7 +614,7 @@ with st.expander("🔎 Artifact içindeki dosya isimleri (debug)", expanded=Fals
         st.error(f"Debug sırasında hata: {e}")
 
 # ------------------------------------------------------------
-# 🗺️ HARİTA — EN ÜSTE
+# 🗺️ HARİTA — EN ÜSTE (GeoJSON tabanlı)
 # ------------------------------------------------------------
 if len(agg):
     agg["risk_bucket"] = agg["risk_mean"].map(bucket_of)
@@ -609,76 +623,69 @@ else:
     agg_sorted = agg
 
 st.subheader("🗺️ Harita — 5 seviye risk renklendirme")
-centroids = load_centroids_from_artifact()
 
-# 🔁 Centroid GEOID'lerini de normalize et (11 haneli)
-if centroids is not None and len(centroids):
-    centroids = normalize_geoid_for_map(centroids)
+geojson = load_geojson()
 
-if centroids is None or len(centroids) == 0 or len(agg_sorted) == 0:
-    if len(view_df_city) and not len(agg_sorted):
+if not len(agg_sorted):
+    if len(view_df_city):
         st.info(
             "Bu aralıkta sadece şehir geneli (GEOID=0) için risk üretilmiş; "
             "hücre (GEOID) bazlı risk olmadığı için harita devre dışı."
         )
     else:
-        st.info("Centroid (geoid→lat/lon) veya hücre bazlı risk verisi bulunamadı. Harita devre dışı.")
-
+        st.info("Seçilen aralıkta GEOID bazlı risk verisi bulunamadı.")
+elif not geojson:
+    st.info("GeoJSON (sf_cells.geojson) bulunamadı; harita devre dışı.")
 else:
-    map_df = (
-        agg_sorted.merge(centroids, on="geoid", how="left")
-        .dropna(subset=["lat", "lon"])
-        .copy()
+    gj_enriched = enrich_geojson_with_risk(geojson, agg_sorted)
+
+    st.markdown(
+        "**Lejand:** "
+        "<span style='background:#ddd;padding:2px 6px;border-radius:4px;'>Çok Düşük</span> "
+        "<span style='background:#b4d2ff;padding:2px 6px;border-radius:4px;'>Düşük</span> "
+        "<span style='background:#ffdc82;padding:2px 6px;border-radius:4px;'>Orta</span> "
+        "<span style='background:#ffaa6e;padding:2px 6px;border-radius:4px;'>Yüksek</span> "
+        "<span style='background:#ff5a5a;padding:2px 6px;border-radius:4px;'>Çok Yüksek</span> ",
+        unsafe_allow_html=True,
     )
-    if len(map_df) == 0:
-        st.info("Harita için lat/lon eşleşmesi bulunamadı.")
-    else:
-        map_df["color"] = map_df["risk_bucket"].map(COLOR_MAP)
 
-        st.markdown(
-            "**Lejand:** "
-            "<span style='background:#ddd;padding:2px 6px;border-radius:4px;'>Çok Düşük</span> "
-            "<span style='background:#b4d2ff;padding:2px 6px;border-radius:4px;'>Düşük</span> "
-            "<span style='background:#ffdc82;padding:2px 6px;border-radius:4px;'>Orta</span> "
-            "<span style='background:#ffaa6e;padding:2px 6px;border-radius:4px;'>Yüksek</span> "
-            "<span style='background:#ff5a5a;padding:2px 6px;border-radius:4px;'>Çok Yüksek</span> ",
-            unsafe_allow_html=True,
-        )
+    layer = pdk.Layer(
+        "GeoJsonLayer",
+        gj_enriched,
+        stroked=True,
+        get_line_color=[80, 80, 80],
+        line_width_min_pixels=0.5,
+        filled=True,
+        get_fill_color="properties.fill_color",
+        pickable=True,
+        opacity=0.65,
+    )
 
-        import pydeck as pdk
+    tooltip = {
+        "html": (
+            "<b>GEOID:</b> {display_id}"
+            "<br/><b>Risk seviyesi:</b> {risk_bucket}"
+            "<br/><b>Ortalama risk skoru (0-1):</b> {risk_mean_txt}"
+            "<br/><b>Beklenen toplam olay:</b> {expected_count_txt}"
+            "<br/><b>En olası suç türü:</b> {top1_category}"
+        ),
+        "style": {"backgroundColor": "#262730", "color": "white"},
+    }
 
-        # Tooltip'te opsiyonel alanlar varsa göster
-        tooltip_text = "GEOID {geoid}\\nOrtalama risk {risk_mean:.3f}\\nSeviye {risk_bucket}"
-        if "expected_crimes" in map_df.columns:
-            tooltip_text += "\\nBeklenen suç {expected_crimes:.3f}"
-        elif "expected_count" in map_df.columns:
-            tooltip_text += "\\nBeklenen suç {expected_count:.3f}"
-        if "top1_category" in map_df.columns:
-            tooltip_text += "\\nEn olası tür {top1_category}"
+    view_state = pdk.ViewState(
+        latitude=37.7749,
+        longitude=-122.4194,
+        zoom=10.5,
+    )
 
-        layer = pdk.Layer(
-            "ScatterplotLayer",
-            data=map_df,
-            get_position='[lon, lat]',
-            get_fill_color='color',
-            get_radius=80 if mode.startswith("Saatlik") else 120,
-            pickable=True,
-            radius_min_pixels=2,
-            radius_max_pixels=20,
-            auto_highlight=True,
+    st.pydeck_chart(
+        pdk.Deck(
+            layers=[layer],
+            initial_view_state=view_state,
+            map_style="light",
+            tooltip=tooltip,
         )
-        view_state = pdk.ViewState(
-            latitude=float(map_df["lat"].median()),
-            longitude=float(map_df["lon"].median()),
-            zoom=11,
-        )
-        st.pydeck_chart(
-            pdk.Deck(
-                layers=[layer],
-                initial_view_state=view_state,
-                tooltip={"text": tooltip_text},
-            )
-        )
+    )
 
 # ------------------------------------------------------------
 # 🧠 Özet kartlar
@@ -1031,5 +1038,6 @@ with tab3:
 st.caption(
     "Kaynak: artifact 'fr-crime-outputs-parquet' → "
     "risk_hourly_next24h_top3 / risk_daily_next365d_top5 (parquet veya csv). "
-    "Harita, centroid (GEOID→lat/lon) dosyası artifact içinde bulunursa otomatik etkinleşir."
+    "Harita geometri kaynağı: repo içindeki 'data/sf_cells.geojson' dosyası."
 )
+
