@@ -254,53 +254,59 @@ def coerce_centroids(any_df: pd.DataFrame) -> pd.DataFrame | None:
 
 @st.cache_data(show_spinner=False)
 def load_centroids_from_artifact() -> pd.DataFrame | None:
+    """
+    Artifact ZIP'i içinden centroidleri yükler.
+
+    Önce doğrudan:
+        geoid_centroids
+        sf_geoid_centroids
+    sonra fallback olarak:
+        sf_crime_grid_full_labeled
+
+    isimli dosyaların *stem*'ini kullanır, yani zip içindeki
+    klasör yapısı ve .csv/.parquet uzantısı fark etmez.
+    """
     try:
         url, headers = resolve_latest_artifact_zip_url(
             REPOSITORY_OWNER, REPOSITORY_NAME, ARTIFACT_NAME_SHOULD_CONTAIN
         )
         if not url:
             return None
+
         resp = requests.get(url, headers=headers, timeout=120, allow_redirects=True)
         resp.raise_for_status()
-        with zipfile.ZipFile(BytesIO(resp.content)) as outer:
-            # Önce dış zip içinde adayları dene
-            for cand in CENTROID_FILE_CANDIDATES:
-                try:
-                    with outer.open(cand) as f:
-                        b = f.read()
-                    try:
-                        dfm = pd.read_parquet(BytesIO(b))
-                    except Exception:
-                        dfm = pd.read_csv(BytesIO(b))
-                    c = coerce_centroids(dfm)
-                    if c is not None and len(c):
-                        return c
-                except KeyError:
-                    continue
+        zip_bytes = resp.content
 
-            # Eğer dış zip'te yoksa, iç zip'leri dene
-            for name in outer.namelist():
-                if name.lower().endswith(".zip"):
-                    with outer.open(name) as f_z:
-                        inner_bytes = f_z.read()
-                    try:
-                        with zipfile.ZipFile(BytesIO(inner_bytes)) as inner:
-                            for cand in CENTROID_FILE_CANDIDATES:
-                                try:
-                                    with inner.open(cand) as f:
-                                        b = f.read()
-                                    try:
-                                        dfm = pd.read_parquet(BytesIO(b))
-                                    except Exception:
-                                        dfm = pd.read_csv(BytesIO(b))
-                                    c = coerce_centroids(dfm)
-                                    if c is not None and len(c):
-                                        return c
-                                except KeyError:
-                                    continue
-                    except zipfile.BadZipFile:
-                        continue
+        # Önce net centroid dosyalarını dene
+        centroid_stems = [
+            "geoid_centroids",
+            "sf_geoid_centroids",
+        ]
+
+        for stem in centroid_stems:
+            try:
+                dfm = read_member_from_zip_bytes(zip_bytes, stem)
+                c = coerce_centroids(dfm)
+                if c is not None and len(c):
+                    return c
+            except FileNotFoundError:
+                continue
+
+        # Fallback: grid dosyasında lat/lon varsa oradan centroid üret
+        grid_stems = [
+            "sf_crime_grid_full_labeled",
+        ]
+        for stem in grid_stems:
+            try:
+                dfm = read_member_from_zip_bytes(zip_bytes, stem)
+                c = coerce_centroids(dfm)
+                if c is not None and len(c):
+                    return c
+            except FileNotFoundError:
+                continue
+
         return None
+
     except Exception:
         return None
 
