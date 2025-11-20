@@ -496,20 +496,28 @@ if mode.startswith("Saatlik"):
 else:
     selected_hours = []
 
-# Tarih aralığı
-now = datetime.now()
+# Tarih aralığı  ➜ SF yerel zamanına göre
+if ZoneInfo is not None:
+    now_sf = datetime.now(ZoneInfo("America/Los_Angeles"))
+else:
+    # Fallback: UTC / sistem zamanı
+    now_sf = datetime.utcnow()
+
 max_days = 7 if mode.startswith("Saatlik") else 365
-st.sidebar.caption(f"{'Saatlik' if max_days == 7 else 'Günlük'} görünümde en fazla {max_days} gün seçebilirsiniz.")
+st.sidebar.caption(
+    f"{'Saatlik' if max_days == 7 else 'Günlük'} görünümde en fazla {max_days} gün seçebilirsiniz. "
+    "(San Francisco yerel zamanı baz alınır.)"
+)
 
 # 🔁 MOD: Saatlik ve Günlük mod için farklı varsayılan tarih aralığı
 if mode.startswith("Saatlik"):
-    # Saatlik görünüm: dün–bugün (eski davranış korunuyor)
-    d_start_default = (now - timedelta(days=1)).date()
-    d_end_default   = now.date()
+    # Saatlik görünüm: SF bugün (sadece bugünün blokları)
+    d_start_default = now_sf.date()
+    d_end_default   = now_sf.date()
 else:
-    # Günlük (365 gün) görünüm: sadece "bugün"
-    d_start_default = now.date()
-    d_end_default   = now.date()
+    # Günlük (365 gün) görünüm: SF bugün
+    d_start_default = now_sf.date()
+    d_end_default   = now_sf.date()
 
 d_start = st.sidebar.date_input("Başlangıç tarihi", value=d_start_default)
 d_end   = st.sidebar.date_input("Bitiş tarihi",     value=d_end_default)
