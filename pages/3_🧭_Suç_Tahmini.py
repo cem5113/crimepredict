@@ -30,7 +30,7 @@ REPOSITORY_NAME  = "crime_prediction_data"
 ARTIFACT_NAME_SHOULD_CONTAIN = "fr-crime-outputs-parquet"  # FR risk çıktıları artifact'i
 
 # Artifact içindeki beklenen dosyalar (FR pipeline risk çıktıları)
-ARTIFACT_MEMBER_HOURLY = "risk_hourly_next24h_top3"
+ARTIFACT_MEMBER_HOURLY = "risk_3h_next7d_top3"
 ARTIFACT_MEMBER_DAILY  = "risk_daily_next365d_top5"
 
 # Yerel GeoJSON (2_🗺️_Risk_Haritası.py ile aynı)
@@ -164,6 +164,18 @@ def load_artifact_member(member: str) -> pd.DataFrame:
 #         kolonlar normalize ediliyor.
 # ------------------------------------------------------------
 def normalize_hourly_schema(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    risk_3h_next7d_top3 için saatlik (3-saatlik blok) şema normalizasyonu.
+
+    Desteklenen kolonlar:
+      - date
+      - geoid
+      - risk_score / p_stack / prob / probability / score / risk
+      - hour  veya  hour_range_3h / hour_range / hour_block
+
+    Eğer hour yoksa, hour_range_3h içinden başlangıç saati (0,3,6,...) çıkarılır
+    ve 'hour' kolonuna yazılır. 'timestamp' = date + hour (saat) olarak üretilir.
+    """
     df = df.copy()
     cols = {c.lower(): c for c in df.columns}
 
@@ -175,23 +187,65 @@ def normalize_hourly_schema(df: pd.DataFrame) -> pd.DataFrame:
                 return cols[n.lower()]
         return None
 
-    c_date  = pick("date")
-    c_hour  = pick("hour", "hour_idx", "hour_of_day", "hour_index")
-    c_geoid = pick("geoid", "GEOID", "cell_id", "id")
-    c_risk  = pick("risk_score", "p_stack", "prob", "probability", "score", "risk")
+    c_date   = pick("date")
+    c_hour   = pick("hour", "hour_idx", "hour_of_day", "hour_index")
+    c_hrange = pick("hour_range_3h", "hour_range", "hour_block")
+    c_geoid  = pick("geoid", "GEOID", "cell_id", "id")
+    c_risk   = pick("risk_score", "p_stack", "prob", "probability", "score", "risk")
 
-    if not (c_date and c_hour and c_geoid and c_risk):
-        raise ValueError("Saatlik veri için 'date, hour, geoid, risk_score' zorunlu.")
+    if not (c_date and c_geoid and c_risk and (c_hour or c_hrange)):
+        raise ValueError(
+            "Saatlik veri için 'date, geoid, risk_score' ve 'hour' veya "
+            "'hour_range_3h' benzeri bir kolon zorunlu."
+        )
 
+    # Tarih
     df["date"] = pd.to_datetime(df[c_date], errors="coerce")
-    df["hour"] = pd.to_numeric(df[c_hour], errors="coerce").astype("Int64").clip(0, 23)
+
+    # GEOID ve risk skoru
     df["geoid"] = df[c_geoid].astype(str)
     df["risk_score"] = pd.to_numeric(df[c_risk], errors="coerce")
 
+    # Saat: varsa doğrudan 'hour', yoksa hour_range_3h içinden başlangıç saati
+    if c_hour:
+        df["hour"] = (
+            pd.to_numeric(df[c_hour], errors="coerce")
+            .astype("Int64")
+            .clip(0, 23)
+        )
+    else:
+        def parse_start_hour(val) -> float:
+            if pd.isna(val):
+                return np.nan
+            s = str(val).strip()
+            # farklı tire karakterlerini normalize et
+            s = s.replace("–", "-").replace("—", "-")
+            if "-" not in s:
+                return np.nan
+            a, _ = s.split("-", 1)
+            try:
+                h0 = int(a.strip())
+                # 0–23 aralığına zorla
+                h0 = max(0, min(23, h0))
+                return h0
+            except Exception:
+                return np.nan
+
+        df["hour"] = df[c_hrange].map(parse_start_hour).astype("Int64")
+
+    # İsteğe bağlı: hour_range stringini de sakla (ileride lazım olursa)
+    if c_hrange:
+        df["hour_range_3h"] = df[c_hrange].astype(str)
+
+    # Geçersiz satırları at
     df = df.dropna(subset=["date", "hour", "geoid"]).copy()
+
+    # Zaman damgası: tarih + saat
     df["timestamp"] = df["date"].dt.floor("D") + pd.to_timedelta(
-        df["hour"].fillna(0).astype(int), unit="h"
+        df["hour"].fillna(0).astype(int),
+        unit="h",
     )
+
     return df
 
 def normalize_daily_schema(df: pd.DataFrame) -> pd.DataFrame:
@@ -1037,7 +1091,7 @@ with tab3:
 # ------------------------------------------------------------
 st.caption(
     "Kaynak: artifact 'fr-crime-outputs-parquet' → "
-    "risk_hourly_next24h_top3 / risk_daily_next365d_top5 (parquet veya csv). "
+    "risk_3h_next7d_top3 / risk_daily_next365d_top5 (parquet veya csv). "
     "Harita geometri kaynağı: repo içindeki 'data/sf_cells.geojson' dosyası."
 )
 
