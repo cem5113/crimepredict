@@ -8,8 +8,8 @@ import io
 import posixpath
 import zipfile
 from io import BytesIO
-
 from datetime import datetime, timedelta
+
 try:
     from zoneinfo import ZoneInfo
 except Exception:
@@ -28,7 +28,6 @@ REPOSITORY_NAME  = "crime_prediction_data"
 ARTIFACT_NAME_SHOULD_CONTAIN = "fr-crime-outputs-parquet"  # FR risk çıktıları artifact'i
 
 # Artifact içindeki beklenen dosyalar (FR pipeline risk çıktıları)
-# Burada sadece gövde ismini veriyoruz; uzantı/parquet/csv otomatik bulunacak
 ARTIFACT_MEMBER_HOURLY = "risk_hourly_next24h_top3"
 ARTIFACT_MEMBER_DAILY  = "risk_daily_next365d_top5"
 
@@ -147,7 +146,6 @@ def read_member_from_zip_bytes(zip_bytes: bytes, member_path: str) -> pd.DataFra
                         if df_inner is not None:
                             return df_inner
                 except zipfile.BadZipFile:
-                    # İçerik zip değilse geç
                     continue
 
     # Hiçbir eşleşme bulunamadıysa:
@@ -168,9 +166,13 @@ def load_artifact_member(member: str) -> pd.DataFrame:
 
 # ------------------------------------------------------------
 # 🧭 Şema doğrulayıcılar (hourly/daily)
+#    NOT: Artık tüm FR kolonları korunuyor, sadece zorunlu
+#         kolonlar normalize ediliyor.
 # ------------------------------------------------------------
 def normalize_hourly_schema(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
     cols = {c.lower(): c for c in df.columns}
+
     def pick(*names):
         for n in names:
             if n in df.columns:
@@ -180,26 +182,28 @@ def normalize_hourly_schema(df: pd.DataFrame) -> pd.DataFrame:
         return None
 
     c_date  = pick("date")
-    c_hour  = pick("hour")
+    c_hour  = pick("hour", "hour_idx", "hour_of_day", "hour_index")
     c_geoid = pick("geoid", "GEOID", "cell_id", "id")
     c_risk  = pick("risk_score", "p_stack", "prob", "probability", "score", "risk")
+
     if not (c_date and c_hour and c_geoid and c_risk):
         raise ValueError("Saatlik veri için 'date, hour, geoid, risk_score' zorunlu.")
 
-    out = pd.DataFrame({
-        "date": pd.to_datetime(df[c_date], errors="coerce"),
-        "hour": pd.to_numeric(df[c_hour], errors="coerce").astype("Int64").clip(0, 23),
-        "geoid": df[c_geoid].astype(str),
-        "risk_score": pd.to_numeric(df[c_risk], errors="coerce"),
-    }).dropna(subset=["date", "hour", "geoid"]).copy()
-    out["timestamp"] = (
-        out["date"].dt.floor("D")
-        + pd.to_timedelta(out["hour"].fillna(0).astype(int), unit="h")
+    df["date"] = pd.to_datetime(df[c_date], errors="coerce")
+    df["hour"] = pd.to_numeric(df[c_hour], errors="coerce").astype("Int64").clip(0, 23)
+    df["geoid"] = df[c_geoid].astype(str)
+    df["risk_score"] = pd.to_numeric(df[c_risk], errors="coerce")
+
+    df = df.dropna(subset=["date", "hour", "geoid"]).copy()
+    df["timestamp"] = df["date"].dt.floor("D") + pd.to_timedelta(
+        df["hour"].fillna(0).astype(int), unit="h"
     )
-    return out[["timestamp", "date", "hour", "geoid", "risk_score"]]
+    return df
 
 def normalize_daily_schema(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
     cols = {c.lower(): c for c in df.columns}
+
     def pick(*names):
         for n in names:
             if n in df.columns:
@@ -211,21 +215,23 @@ def normalize_daily_schema(df: pd.DataFrame) -> pd.DataFrame:
     c_date  = pick("date")
     c_geoid = pick("geoid", "GEOID", "cell_id", "id")
     c_risk  = pick("risk_score", "p_stack", "prob", "probability", "score", "risk")
+
     if not (c_date and c_geoid and c_risk):
         raise ValueError("Günlük veri için 'date, geoid, risk_score' zorunlu.")
 
-    out = pd.DataFrame({
-        "date": pd.to_datetime(df[c_date], errors="coerce").dt.floor("D"),
-        "geoid": df[c_geoid].astype(str),
-        "risk_score": pd.to_numeric(df[c_risk], errors="coerce"),
-    }).dropna(subset=["date", "geoid"]).copy()
-    return out[["date", "geoid", "risk_score"]]
+    df["date"] = pd.to_datetime(df[c_date], errors="coerce").dt.floor("D")
+    df["geoid"] = df[c_geoid].astype(str)
+    df["risk_score"] = pd.to_numeric(df[c_risk], errors="coerce")
+
+    df = df.dropna(subset=["date", "geoid"]).copy()
+    return df
 
 # ------------------------------------------------------------
 # 🗺️ Centroid yükleyici (yalnızca artifact içi otomatik arama)
 # ------------------------------------------------------------
 def coerce_centroids(any_df: pd.DataFrame) -> pd.DataFrame | None:
     cols = {c.lower(): c for c in any_df.columns}
+
     def pick(*names):
         for n in names:
             if n in any_df.columns:
@@ -308,6 +314,7 @@ RISK_BUCKETS = [
     (0.60, 0.80, "Yüksek",    [255, 170, 110, 220]),
     (0.80, 1.01, "Çok Yüksek",[255,  90,  90, 240]),
 ]
+
 def bucket_of(v: float) -> str:
     x = 0.0 if pd.isna(v) else float(v)
     for lo, hi, name, _ in RISK_BUCKETS:
@@ -365,7 +372,6 @@ if mode.startswith("Saatlik"):
         "21–24": (21, 23),
     }
 
-    # Varsayılan: San Francisco'da şu an hangi bloksa o
     default_label = default_hour_block_label(hour_blocks)
 
     selected_label = st.sidebar.select_slider(
@@ -409,7 +415,6 @@ def load_daily_dataframe() -> pd.DataFrame:
     raw = load_artifact_member(ARTIFACT_MEMBER_DAILY)
     return normalize_daily_schema(raw)
 
-# NameError olmaması için başlangıçta boş default'lar:
 agg = pd.DataFrame()
 view_df = pd.DataFrame()
 time_col = "timestamp"
@@ -424,9 +429,6 @@ with st.spinner("Veriler yükleniyor…"):
             df = df[df["geoid"].isin(geoids_sel)].copy()
         if selected_hours:
             df = df[df["hour"].isin(selected_hours)].copy()
-        agg = df.groupby("geoid", as_index=False)["risk_score"].mean().rename(
-            columns={"risk_score": "risk_mean"}
-        )
         view_df = df
         time_col = "timestamp"
     else:
@@ -436,11 +438,45 @@ with st.spinner("Veriler yükleniyor…"):
         df = src[(src["date"] >= t0) & (src["date"] <= t1)].copy()
         if geoids_sel:
             df = df[df["geoid"].isin(geoids_sel)].copy()
-        agg = df.groupby("geoid", as_index=False)["risk_score"].mean().rename(
-            columns={"risk_score": "risk_mean"}
-        )
         view_df = df
         time_col = "date"
+
+    if len(view_df):
+        # Temel GEOID bazlı risk ortalaması
+        agg = (
+            view_df.groupby("geoid", as_index=False)["risk_score"]
+            .mean()
+            .rename(columns={"risk_score": "risk_mean"})
+        )
+
+        # Opsiyonel kolonları GEOID bazında özetle (risk_prob, expected_crimes, top1_category vs.)
+        def safe_mean(col_name: str):
+            if col_name in view_df.columns:
+                return (
+                    view_df.groupby("geoid", as_index=False)[col_name]
+                    .mean()
+                )
+            return None
+
+        def safe_first(col_name: str):
+            if col_name in view_df.columns:
+                tmp = (
+                    view_df.sort_values(time_col)
+                    .groupby("geoid", as_index=False)[col_name]
+                    .first()
+                )
+                return tmp
+            return None
+
+        for c in ["risk_prob", "expected_crimes", "expected_count"]:
+            tmp = safe_mean(c)
+            if tmp is not None:
+                agg = agg.merge(tmp, on="geoid", how="left")
+
+        for c in ["risk_level", "risk_decile", "top1_category"]:
+            tmp = safe_first(c)
+            if tmp is not None:
+                agg = agg.merge(tmp, on="geoid", how="left")
 
 # ------------------------------------------------------------
 # 🔎 DEBUG — Artifact ZIP içindeki dosya isimlerini göster
@@ -458,12 +494,9 @@ with st.expander("🔎 Artifact içindeki dosya isimleri (debug)", expanded=Fals
             st.write(f"Dış ZIP toplam dosya: {len(names_outer)}")
             st.write(names_outer)
 
-            # İç ZIP'leri listele ve içeriklerini göster
-            inner_list = []
             with zipfile.ZipFile(BytesIO(r.content)) as outer2:
                 for name in outer2.namelist():
                     if name.lower().endswith(".zip"):
-                        inner_list.append(name)
                         with outer2.open(name) as f_z:
                             inner_bytes = f_z.read()
                         try:
@@ -472,8 +505,6 @@ with st.expander("🔎 Artifact içindeki dosya isimleri (debug)", expanded=Fals
                                 st.write(inner.namelist())
                         except zipfile.BadZipFile:
                             st.write(f"İç ZIP açılamadı: {name}")
-            if not inner_list:
-                st.write("İç ZIP bulunamadı.")
         else:
             st.warning("Artifact bulunamadı veya token eksik.")
     except Exception as e:
@@ -490,16 +521,20 @@ else:
 
 st.subheader("🗺️ Harita — 5 seviye risk renklendirme")
 centroids = load_centroids_from_artifact()
-if centroids is None or len(centroids) == 0:
-    st.info("Centroid (geoid→lat/lon) artifact içinde bulunamadı. Harita devre dışı.")
+
+if centroids is None or len(centroids) == 0 or len(agg_sorted) == 0:
+    st.info("Centroid (geoid→lat/lon) veya risk verisi bulunamadı. Harita devre dışı.")
 else:
-    map_df = agg_sorted.merge(centroids, on="geoid", how="left").dropna(
-        subset=["lat", "lon"]
-    ).copy()
+    map_df = (
+        agg_sorted.merge(centroids, on="geoid", how="left")
+        .dropna(subset=["lat", "lon"])
+        .copy()
+    )
     if len(map_df) == 0:
         st.info("Harita için lat/lon eşleşmesi bulunamadı.")
     else:
         map_df["color"] = map_df["risk_bucket"].map(COLOR_MAP)
+
         st.markdown(
             "**Lejand:** "
             "<span style='background:#ddd;padding:2px 6px;border-radius:4px;'>Çok Düşük</span> "
@@ -509,7 +544,18 @@ else:
             "<span style='background:#ff5a5a;padding:2px 6px;border-radius:4px;'>Çok Yüksek</span> ",
             unsafe_allow_html=True,
         )
+
         import pydeck as pdk
+
+        # Tooltip'te opsiyonel alanlar varsa göster
+        tooltip_text = "GEOID {geoid}\\nOrtalama risk {risk_mean:.3f}\\nSeviye {risk_bucket}"
+        if "expected_crimes" in map_df.columns:
+            tooltip_text += "\\nBeklenen suç {expected_crimes:.3f}"
+        elif "expected_count" in map_df.columns:
+            tooltip_text += "\\nBeklenen suç {expected_count:.3f}"
+        if "top1_category" in map_df.columns:
+            tooltip_text += "\\nEn olası tür {top1_category}"
+
         layer = pdk.Layer(
             "ScatterplotLayer",
             data=map_df,
@@ -530,9 +576,7 @@ else:
             pdk.Deck(
                 layers=[layer],
                 initial_view_state=view_state,
-                tooltip={
-                    "text": "GEOID {geoid}\\nRisk {risk_mean:.3f}\\nSeviye {risk_bucket}"
-                },
+                tooltip={"text": tooltip_text},
             )
         )
 
@@ -556,72 +600,305 @@ c3.metric(
 )
 
 # ------------------------------------------------------------
-# 🔝 Top-K tablo + indir
+# GEOID seçimi (detay sekmeleri için)
 # ------------------------------------------------------------
-st.subheader("🔝 Top-K GEOID")
-topk = agg_sorted.head(top_k).copy()
-st.dataframe(topk, use_container_width=True, height=420)
-st.download_button(
-    "⬇️ CSV indir (Top-K)",
-    data=csv_bytes(topk),
-    file_name="risk_topk.csv",
-    mime="text/csv",
-)
+if len(agg_sorted):
+    selected_geoid = st.selectbox(
+        "Detay göstermek için GEOID seç:",
+        options=agg_sorted["geoid"].tolist(),
+        index=0,
+    )
+else:
+    selected_geoid = None
+
+# Top-K her halükârda hesaplayalım (sekme içinde kullanacağız)
+topk = agg_sorted.head(top_k).copy() if len(agg_sorted) else pd.DataFrame()
 
 # ------------------------------------------------------------
-# 📈 Zaman serisi (seçili GEOID'ler)
+# 🔍 Sekmeli görünüm: Özet & nedenler / Zaman serisi / Isı haritası & Top-K
 # ------------------------------------------------------------
-st.subheader("📈 Zaman serisi (risk_score)")
-if len(view_df) == 0:
-    st.info("Seçilen aralık için veri yok.")
-else:
-    default_geoids = topk["geoid"].head(3).tolist() if len(topk) else []
-    options_geoids = sorted(view_df["geoid"].unique().tolist())
-    chosen = st.multiselect(
-        "Grafik GEOID seç", options=options_geoids, default=default_geoids
-    )
-    if len(chosen):
-        piv = (
-            view_df[view_df["geoid"].isin(chosen)]
-            .pivot_table(
-                index=time_col, columns="geoid", values="risk_score", aggfunc="mean"
+tab1, tab2, tab3 = st.tabs(["Özet & Nedenler", "Zaman Serisi", "Isı Haritası / Top-K"])
+
+# --------------------------- TAB 1: Özet & Nedenler ---------------------------
+with tab1:
+    st.subheader("📌 Seçili GEOID için risk özeti ve nedenler")
+
+    if selected_geoid is None or len(view_df) == 0:
+        st.info("Görüntülenecek veri bulunamadı.")
+    else:
+        df_sel = (
+            view_df[view_df["geoid"] == selected_geoid]
+            .sort_values(time_col)
+            .copy()
+        )
+        if len(df_sel) == 0:
+            st.info("Seçili GEOID için veri yok.")
+        else:
+            latest = df_sel.iloc[-1]
+
+            def gv(col, default="—"):
+                return latest[col] if col in df_sel.columns and pd.notna(latest[col]) else default
+
+            # Üstte küçük metrik kartlar
+            c1, c2, c3 = st.columns(3)
+            c1.metric("GEOID", selected_geoid)
+            c2.metric("Son pencere risk skoru", f"{gv('risk_score', np.nan):.4f}" if gv("risk_score", np.nan) == gv("risk_score", np.nan) else "—")
+            if "risk_prob" in df_sel.columns:
+                c3.metric("Risk olasılığı", f"{gv('risk_prob', np.nan):.4f}" if gv("risk_prob", np.nan) == gv("risk_prob", np.nan) else "—")
+            elif "risk_mean" in agg_sorted.columns:
+                c3.metric("Ortalama risk", f"{float(agg_sorted.loc[agg_sorted['geoid']==selected_geoid, 'risk_mean'].iloc[0]):.4f}")
+            else:
+                c3.metric("Ortalama risk", "—")
+
+            # İkinci satır: beklenen suç, komşu suç, 911/311
+            c4, c5, c6 = st.columns(3)
+            if "expected_crimes" in df_sel.columns:
+                c4.metric("Beklenen suç (son pencere)", f"{gv('expected_crimes', np.nan):.4f}" if gv("expected_crimes", np.nan) == gv("expected_crimes", np.nan) else "—")
+            elif "expected_count" in df_sel.columns:
+                c4.metric("Beklenen suç (son pencere)", f"{gv('expected_count', np.nan):.4f}" if gv("expected_count", np.nan) == gv("expected_count", np.nan) else "—")
+            else:
+                c4.metric("Beklenen suç", "—")
+
+            if "neighbor_crime_7d" in df_sel.columns:
+                c5.metric("Komşu suç (7gün)", f"{gv('neighbor_crime_7d', 0):.1f}")
+            elif "neighbor_crime_24h" in df_sel.columns:
+                c5.metric("Komşu suç (24s)", f"{gv('neighbor_crime_24h', 0):.1f}")
+            else:
+                c5.metric("Komşu suç", "—")
+
+            if "911_request_count_hour_range" in df_sel.columns:
+                c6.metric("911 çağrıları (saat aralığı)", f"{gv('911_request_count_hour_range', 0):.1f}")
+            elif "911_geo_last3d" in df_sel.columns:
+                c6.metric("911 çağrıları (3gün)", f"{gv('911_geo_last3d', 0):.1f}")
+            else:
+                c6.metric("911 çağrıları", "—")
+
+            # POI / ulaşım / demografi
+            c7, c8, c9 = st.columns(3)
+            if "poi_risk_score" in df_sel.columns:
+                c7.metric("POI risk skoru", f"{gv('poi_risk_score', 0):.2f}")
+            elif "poi_total_count" in df_sel.columns:
+                c7.metric("POI sayısı", f"{gv('poi_total_count', 0):.0f}")
+            else:
+                c7.metric("POI", "—")
+
+            if "bus_stop_count" in df_sel.columns:
+                c8.metric("Otobüs durağı sayısı", f"{gv('bus_stop_count', 0):.0f}")
+            elif "train_stop_count" in df_sel.columns:
+                c8.metric("Tren durağı sayısı", f"{gv('train_stop_count', 0):.0f}")
+            else:
+                c8.metric("Toplu taşıma", "—")
+
+            if "population" in df_sel.columns:
+                c9.metric("Nüfus", f"{gv('population', 0):,.0f}")
+            else:
+                c9.metric("Nüfus", "—")
+
+            # Hava durumu / zaman bayrakları mini satır
+            flags = []
+            if "wx_tavg" in df_sel.columns:
+                flags.append(f"Ortalama sıcaklık: {gv('wx_tavg', '—')}")
+            if "wx_prcp" in df_sel.columns:
+                flags.append(f"Yağış (mm): {gv('wx_prcp', '—')}")
+            if "wx_is_rainy" in df_sel.columns:
+                if gv("wx_is_rainy", 0) == 1:
+                    flags.append("Yağışlı gün")
+            if "wx_is_hot_day" in df_sel.columns:
+                if gv("wx_is_hot_day", 0) == 1:
+                    flags.append("Sıcak gün")
+
+            if "is_night" in df_sel.columns:
+                flags.append("Gece" if gv("is_night", 0) == 1 else "Gündüz")
+            if "is_weekend" in df_sel.columns:
+                flags.append("Hafta sonu" if gv("is_weekend", 0) == 1 else "Hafta içi")
+            if "is_holiday" in df_sel.columns:
+                if gv("is_holiday", 0) == 1:
+                    flags.append("Resmî tatil")
+            if "is_business_hour" in df_sel.columns:
+                if gv("is_business_hour", 0) == 1:
+                    flags.append("Mesai saatleri")
+            if "is_school_hour" in df_sel.columns:
+                if gv("is_school_hour", 0) == 1:
+                    flags.append("Okul saatleri")
+
+            # Sezon / gün / saat aralığı ek bilgi
+            if "season_x" in df_sel.columns:
+                flags.append(f"Mevsim: {gv('season_x', '—')}")
+            if "day_of_week_x" in df_sel.columns:
+                flags.append(f"Gün: {gv('day_of_week_x', '—')}")
+            if "hour_range_x" in df_sel.columns:
+                flags.append(f"Saat aralığı: {gv('hour_range_x', '—')}")
+
+            if len(flags):
+                st.markdown(
+                    "<br>".join([f"• {f}" for f in flags]),
+                    unsafe_allow_html=True,
+                )
+
+            st.markdown("---")
+
+            # ----------------- NEDENLER / AÇIKLAMA BLOĞU -----------------
+            st.markdown("### 🧠 Modelin öne çıkardığı nedenler")
+
+            reasons = []
+            for i in range(1, 6):
+                col = f"reason_{i}"
+                if col in df_sel.columns:
+                    txt = gv(col, "")
+                    if isinstance(txt, str) and txt.strip():
+                        reasons.append(txt.strip())
+
+            col_left, col_right = st.columns([1, 1])
+
+            with col_left:
+                if reasons:
+                    st.markdown("**Ana nedenler (otomatik açıklamalar):**")
+                    for r in reasons:
+                        st.markdown(f"- {r}")
+                else:
+                    st.info("Bu GEOID için kayıtlı ayrıntılı 'reason_1–5' açıklaması bulunamadı.")
+
+            with col_right:
+                if "explanation_report" in df_sel.columns:
+                    rep = gv("explanation_report", "")
+                    if isinstance(rep, str) and rep.strip():
+                        st.markdown("**Detaylı açıklama raporu:**")
+                        st.markdown(
+                            f"<div style='max-height:260px; overflow:auto; padding:6px; "
+                            f"border-radius:6px; border:1px solid #ddd; background-color:#fafafa;'>"
+                            f"{rep}</div>",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.caption("Detaylı açıklama raporu boş.")
+                else:
+                    st.caption("`explanation_report` alanı bu dataset içinde yok.")
+
+            st.markdown("---")
+
+            # ----------------- SUÇ TÜRÜ KOMPOZİSYONU TABLOSU -----------------
+            st.markdown("### 🧬 Beklenen suç türü kompozisyonu")
+
+            # Top1–Top5 ve pay/olasılık/expected sütunlarını derle
+            rows = []
+            for k in range(1, 6):
+                cat_col = f"top{k}_category"
+                share_col = f"top{k}_share"
+                prob_col = f"top{k}_prob"
+                exp_col = f"top{k}_expected"
+
+                if cat_col not in df_sel.columns:
+                    continue
+
+                cat = gv(cat_col, "")
+                if not isinstance(cat, str) or not cat.strip():
+                    continue
+
+                row = {"Sıra": k, "Suç türü": cat}
+
+                if share_col in df_sel.columns:
+                    row["Pay (share)"] = gv(share_col, np.nan)
+                if prob_col in df_sel.columns:
+                    row["Olasılık (prob)"] = gv(prob_col, np.nan)
+                if exp_col in df_sel.columns:
+                    row["Beklenen sayı"] = gv(exp_col, np.nan)
+
+                rows.append(row)
+
+            if rows:
+                df_comp = pd.DataFrame(rows)
+                st.dataframe(
+                    df_comp.style.format(
+                        {
+                            "Pay (share)": "{:.3f}",
+                            "Olasılık (prob)": "{:.3f}",
+                            "Beklenen sayı": "{:.3f}",
+                        }
+                    ),
+                    use_container_width=True,
+                )
+            else:
+                st.info("Top1–Top5 suç türü kompozisyon bilgisi bu GEOID için bulunamadı.")
+
+# --------------------------- TAB 2: Zaman Serisi ---------------------------
+with tab2:
+    st.subheader("📈 Zaman serisi (risk_score)")
+
+    if len(view_df) == 0:
+        st.info("Seçilen tarih/saat aralığı için veri yok.")
+    else:
+        # Varsayılan: Top-K içindeki ilk 3 GEOID
+        default_geoids = topk["geoid"].head(3).tolist() if len(topk) else []
+        options_geoids = sorted(view_df["geoid"].unique().tolist())
+
+        chosen = st.multiselect(
+            "Grafikte gösterilecek GEOID'ler",
+            options=options_geoids,
+            default=default_geoids,
+        )
+
+        if len(chosen):
+            piv = (
+                view_df[view_df["geoid"].isin(chosen)]
+                .pivot_table(
+                    index=time_col,
+                    columns="geoid",
+                    values="risk_score",
+                    aggfunc="mean",
+                )
+                .sort_index()
             )
+            if len(piv):
+                st.line_chart(piv, height=360)
+            else:
+                st.caption("Seçilen GEOID'ler için veri yok.")
+        else:
+            st.caption("Grafik için en az bir GEOID seçin.")
+
+# --------------------------- TAB 3: Isı Haritası & Top-K ---------------------------
+with tab3:
+    st.subheader("🔥 Isı haritası (GEOID × Zaman)")
+
+    if len(view_df) == 0:
+        st.info("Seçilen aralık için veri yok.")
+    else:
+        heat_index = "hour" if mode.startswith("Saatlik") else "date"
+        heat = (
+            view_df.groupby([heat_index, "geoid"], as_index=False)["risk_score"]
+            .mean()
+            .pivot(index=heat_index, columns="geoid", values="risk_score")
             .sort_index()
         )
-        if len(piv):
-            st.line_chart(piv, height=360)
-        else:
-            st.caption("Seçilen GEOID'ler için veri yok.")
-    else:
-        st.caption("Grafik için en az bir GEOID seçin.")
 
-# ------------------------------------------------------------
-# 🔥 Isı haritası (GEOID × Saat / Gün)
-# ------------------------------------------------------------
-st.subheader("🔥 Isı haritası (GEOID × Zaman)")
-if len(view_df) == 0:
-    st.info("Seçilen aralık için veri yok.")
-else:
-    heat_index = "hour" if mode.startswith("Saatlik") else "date"
-    heat = (
-        view_df.groupby([heat_index, "geoid"], as_index=False)["risk_score"]
-        .mean()
-        .pivot(index=heat_index, columns="geoid", values="risk_score")
-        .sort_index()
-    )
-    visible_cols = topk["geoid"].tolist() if len(topk) else heat.columns.tolist()
-    heat = heat[[g for g in heat.columns if g in visible_cols]]
-    st.dataframe(
-        heat.style.format("{:.3f}"),
-        use_container_width=True,
-        height=420,
-    )
+        # Isı haritasında sadece Top-K GEOID'leri göster (eğer varsa)
+        visible_cols = topk["geoid"].tolist() if len(topk) else heat.columns.tolist()
+        heat = heat[[g for g in heat.columns if g in visible_cols]]
+
+        st.dataframe(
+            heat.style.format("{:.3f}"),
+            use_container_width=True,
+            height=420,
+        )
+
+        st.markdown("---")
+        st.subheader("🔝 Top-K GEOID tablo & indir")
+
+        if len(topk):
+            st.dataframe(topk, use_container_width=True, height=320)
+            st.download_button(
+                "⬇️ CSV indir (Top-K)",
+                data=csv_bytes(topk),
+                file_name="risk_topk.csv",
+                mime="text/csv",
+            )
+        else:
+            st.caption("Top-K tablosu için yeterli veri yok.")
 
 # ------------------------------------------------------------
 # 🧾 Dipnot
 # ------------------------------------------------------------
 st.caption(
-    "Kaynak: artifact 'fr-crime-outputs-parquet' → risk_hourly_next24h_top3 / "
-    "risk_daily_next365d_top5 (parquet veya csv). "
+    "Kaynak: artifact 'fr-crime-outputs-parquet' → "
+    "risk_hourly_next24h_top3 / risk_daily_next365d_top5 (parquet veya csv). "
     "Harita, centroid (GEOID→lat/lon) dosyası artifact içinde bulunursa otomatik etkinleşir."
 )
