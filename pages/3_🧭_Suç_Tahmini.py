@@ -227,6 +227,43 @@ def normalize_daily_schema(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ------------------------------------------------------------
+# 🧩 GEOID normalizasyonu (harita için 11 haneli + şehir geneli = '0')
+# ------------------------------------------------------------
+def normalize_geoid_for_map(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    - 'geoid' kolonu varsa:
+      * GEOID=0 → '0' olarak kalır (şehir geneli)
+      * Diğer tüm değerler → sayıya çevrilip 11 haneli zero-pad yapılır
+        (örn. 6075010101 → '06075010101')
+    """
+    df = df.copy()
+    if "geoid" not in df.columns:
+        return df
+
+    # Önce hepsini string yap
+    df["geoid"] = df["geoid"].astype(str)
+
+    # Şehir geneli satırlar
+    mask_city = df["geoid"].isin(["0", "0.0"])
+
+    # Hücre satırları
+    mask_cells = ~mask_city
+
+    if mask_cells.any():
+        df.loc[mask_cells, "geoid"] = (
+            pd.to_numeric(df.loc[mask_cells, "geoid"], errors="coerce")
+              .astype("Int64")
+              .astype(str)
+              .str.zfill(11)
+        )
+
+    # Şehir geneli satırları tek tip olsun
+    if mask_city.any():
+        df.loc[mask_city, "geoid"] = "0"
+
+    return df
+
+# ------------------------------------------------------------
 # 🗺️ Centroid yükleyici (yalnızca artifact içi otomatik arama)
 # ------------------------------------------------------------
 def coerce_centroids(any_df: pd.DataFrame) -> pd.DataFrame | None:
@@ -443,6 +480,9 @@ time_col = "timestamp"
 with st.spinner("Veriler yükleniyor…"):
     if mode.startswith("Saatlik"):
         src = load_hourly_dataframe()
+        # 🔁 GEOID formatını harita için normalize et
+        src = normalize_geoid_for_map(src)
+
         t0 = pd.to_datetime(d_start)
         t1 = pd.to_datetime(d_end) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
         df = src[(src["timestamp"] >= t0) & (src["timestamp"] <= t1)].copy()
@@ -464,6 +504,9 @@ with st.spinner("Veriler yükleniyor…"):
 
     else:
         src = load_daily_dataframe()
+        # 🔁 GEOID formatını harita için normalize et
+        src = normalize_geoid_for_map(src)
+
         t0 = pd.to_datetime(d_start).floor("D")
         t1 = pd.to_datetime(d_end).floor("D")
         df = src[(src["date"] >= t0) & (src["date"] <= t1)].copy()
@@ -567,6 +610,10 @@ else:
 
 st.subheader("🗺️ Harita — 5 seviye risk renklendirme")
 centroids = load_centroids_from_artifact()
+
+# 🔁 Centroid GEOID'lerini de normalize et (11 haneli)
+if centroids is not None and len(centroids):
+    centroids = normalize_geoid_for_map(centroids)
 
 if centroids is None or len(centroids) == 0 or len(agg_sorted) == 0:
     if len(view_df_city) and not len(agg_sorted):
