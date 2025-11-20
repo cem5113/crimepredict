@@ -101,28 +101,41 @@ def read_member_from_zip_bytes(zip_bytes: bytes, member_path: str) -> pd.DataFra
     with zipfile.ZipFile(BytesIO(zip_bytes)) as z:
         names = z.namelist()
 
-        # 1) tam eşleşme
+        # 1) Tam yol ile eşleşme
         if member_path in names:
             with z.open(member_path) as f:
                 return read_any_table(f.read(), member_path)
 
-        # 2) basename eşleşmesi
+        # 2) Sadece dosya adı (basename) ile eşleşme
         base = posixpath.basename(member_path)
-        cands = [n for n in names if n.endswith("/"+base) or n == base]
-        if cands:
-            with z.open(cands[0]) as f:
-                return read_any_table(f.read(), cands[0])
+        for n in names:
+            if n.endswith("/" + base) or n == base:
+                with z.open(n) as f:
+                    return read_any_table(f.read(), n)
 
-        # 3) parquet<->csv fallback
+        # 3) parquet <-> csv alternatifi sadece gerçekten varsa dene
         alt = None
         if member_path.lower().endswith(".parquet"):
             alt = member_path[:-8] + ".csv"
         elif member_path.lower().endswith(".csv"):
             alt = member_path[:-4] + ".parquet"
-        if alt:
-            return read_member_from_zip_bytes(zip_bytes, alt)
 
-    raise FileNotFoundError(f"ZIP içinde bulunamadı: {member_path}")
+        if alt:
+            base_alt = posixpath.basename(alt)
+            # önce tam yol bak
+            if alt in names:
+                with z.open(alt) as f:
+                    return read_any_table(f.read(), alt)
+            # sonra basename ile ara
+            for n in names:
+                if n.endswith("/" + base_alt) or n == base_alt:
+                    with z.open(n) as f:
+                        return read_any_table(f.read(), n)
+
+    # Hiçbir versiyon bulunamadıysa:
+    raise FileNotFoundError(
+        f"ZIP içinde '{member_path}' ya da CSV/PARQUET alternatifi bulunamadı."
+    )
 
 @st.cache_data(show_spinner=False)
 def load_artifact_member(member: str) -> pd.DataFrame:
