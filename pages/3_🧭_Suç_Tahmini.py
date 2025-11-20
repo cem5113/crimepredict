@@ -417,6 +417,8 @@ def load_daily_dataframe() -> pd.DataFrame:
 
 agg = pd.DataFrame()
 view_df = pd.DataFrame()
+view_df_city = pd.DataFrame()   # geoid == "0" (şehir geneli)
+view_df_cells = pd.DataFrame()  # geoid != "0" (hücreler)
 time_col = "timestamp"
 
 with st.spinner("Veriler yükleniyor…"):
@@ -442,26 +444,36 @@ with st.spinner("Veriler yükleniyor…"):
         time_col = "date"
 
     if len(view_df):
-        # Temel GEOID bazlı risk ortalaması
-        agg = (
-            view_df.groupby("geoid", as_index=False)["risk_score"]
-            .mean()
-            .rename(columns={"risk_score": "risk_mean"})
-        )
+        # GEOID=0 → şehir geneli, diğerleri hücreler
+        mask_city = view_df["geoid"].astype(str) == "0"
+        view_df_city = view_df[mask_city].copy()
+        view_df_cells = view_df[~mask_city].copy()
+
+        if len(view_df_cells):
+            # Temel GEOID bazlı risk ortalaması (Sadece hücreler, şehir geneli hariç)
+            agg = (
+                view_df_cells.groupby("geoid", as_index=False)["risk_score"]
+                .mean()
+                .rename(columns={"risk_score": "risk_mean"})
+            )
+        else:
+            # Her ihtimale karşı fallback
+            view_df_cells = pd.DataFrame()
+            agg = pd.DataFrame()
 
         # Opsiyonel kolonları GEOID bazında özetle (risk_prob, expected_crimes, top1_category vs.)
         def safe_mean(col_name: str):
-            if col_name in view_df.columns:
+            if col_name in view_df_cells.columns and len(view_df_cells):
                 return (
-                    view_df.groupby("geoid", as_index=False)[col_name]
+                    view_df_cells.groupby("geoid", as_index=False)[col_name]
                     .mean()
                 )
             return None
 
         def safe_first(col_name: str):
-            if col_name in view_df.columns:
+            if col_name in view_df_cells.columns and len(view_df_cells):
                 tmp = (
-                    view_df.sort_values(time_col)
+                    view_df_cells.sort_values(time_col)
                     .groupby("geoid", as_index=False)[col_name]
                     .first()
                 )
@@ -470,12 +482,12 @@ with st.spinner("Veriler yükleniyor…"):
 
         for c in ["risk_prob", "expected_crimes", "expected_count"]:
             tmp = safe_mean(c)
-            if tmp is not None:
+            if tmp is not None and len(tmp):
                 agg = agg.merge(tmp, on="geoid", how="left")
 
         for c in ["risk_level", "risk_decile", "top1_category"]:
             tmp = safe_first(c)
-            if tmp is not None:
+            if tmp is not None and len(tmp):
                 agg = agg.merge(tmp, on="geoid", how="left")
 
 # ------------------------------------------------------------
@@ -599,19 +611,30 @@ c3.metric(
     f"{view_df['risk_score'].mean():.3f}" if len(view_df) else "—",
 )
 
-# ------------------------------------------------------------
+# GEOID etiketleyici (0 için özel label)
+def geoid_label(g: str) -> str:
+    return "Şehir geneli (GEOID=0)" if str(g) == "0" else str(g)
+
 # GEOID seçimi (detay sekmeleri için)
-# ------------------------------------------------------------
-if len(agg_sorted):
+options = []
+# Önce şehir geneli (varsa)
+if len(view_df_city):
+    options.append("0")
+# Sonra hücreler (harita/Top-K ile tutarlı)
+if len(view_df_cells):
+    options.extend(sorted(view_df_cells["geoid"].unique().tolist()))
+
+if options:
     selected_geoid = st.selectbox(
         "Detay göstermek için GEOID seç:",
-        options=agg_sorted["geoid"].tolist(),
+        options=options,
         index=0,
+        format_func=geoid_label,
     )
 else:
     selected_geoid = None
 
-# Top-K her halükârda hesaplayalım (sekme içinde kullanacağız)
+# Top-K her halükârda hesaplayalım (sadece hücreler üzerinden)
 topk = agg_sorted.head(top_k).copy() if len(agg_sorted) else pd.DataFrame()
 
 # ------------------------------------------------------------
@@ -820,21 +843,33 @@ with tab1:
             else:
                 st.info("Top1–Top5 suç türü kompozisyon bilgisi bu GEOID için bulunamadı.")
 
-# --------------------------- TAB 2: Zaman Serisi ---------------------------
 with tab2:
     st.subheader("📈 Zaman serisi (risk_score)")
 
     if len(view_df) == 0:
         st.info("Seçilen tarih/saat aralığı için veri yok.")
     else:
-        # Varsayılan: Top-K içindeki ilk 3 GEOID
-        default_geoids = topk["geoid"].head(3).tolist() if len(topk) else []
-        options_geoids = sorted(view_df["geoid"].unique().tolist())
+        # Varsayılan: varsa önce şehir geneli, sonra Top-K içindeki ilk 3 hücre
+        default_geoids = []
+        if len(view_df_city):
+            default_geoids.append("0")
+        if len(topk):
+            default_geoids.extend(topk["geoid"].head(3).tolist())
+
+        # Seçilebilir GEOID listesi: şehir geneli + hücreler
+        options_geoids = []
+        if len(view_df_city):
+            options_geoids.append("0")
+        # Hücreler (0 hariç)
+        options_geoids.extend(
+            sorted([g for g in view_df["geoid"].astype(str).unique().tolist() if g != "0"])
+        )
 
         chosen = st.multiselect(
             "Grafikte gösterilecek GEOID'ler",
             options=options_geoids,
             default=default_geoids,
+            format_func=geoid_label,
         )
 
         if len(chosen):
@@ -870,15 +905,26 @@ with tab3:
             .sort_index()
         )
 
-        # Isı haritasında sadece Top-K GEOID'leri göster (eğer varsa)
-        visible_cols = topk["geoid"].tolist() if len(topk) else heat.columns.tolist()
-        heat = heat[[g for g in heat.columns if g in visible_cols]]
-
+        # 🔥 Isı haritası TÜM GEOID'leri kapsar (şehir geneli = 0 dahil)
         st.dataframe(
             heat.style.format("{:.3f}"),
             use_container_width=True,
             height=420,
         )
+
+        st.markdown("---")
+        st.subheader("🔝 Top-K GEOID tablo & indir")
+
+        if len(topk):
+            st.dataframe(topk, use_container_width=True, height=320)
+            st.download_button(
+                "⬇️ CSV indir (Top-K)",
+                data=csv_bytes(topk),
+                file_name="risk_topk.csv",
+                mime="text/csv",
+            )
+        else:
+            st.caption("Top-K tablosu için yeterli veri yok.")
 
         st.markdown("---")
         st.subheader("🔝 Top-K GEOID tablo & indir")
