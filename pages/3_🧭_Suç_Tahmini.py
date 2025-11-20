@@ -431,8 +431,18 @@ with st.spinner("Veriler yükleniyor…"):
             df = df[df["geoid"].isin(geoids_sel)].copy()
         if selected_hours:
             df = df[df["hour"].isin(selected_hours)].copy()
+
+        # Eğer bu pencere için hiç kayıt yoksa → tüm saatlik risk çıktısını kullan
+        if df.empty:
+            st.info(
+                "Seçilen tarih/saat aralığı için kayıt bulunamadı; "
+                "en güncel saatlik risk çıktısı gösteriliyor."
+            )
+            df = src.copy()
+
         view_df = df
         time_col = "timestamp"
+
     else:
         src = load_daily_dataframe()
         t0 = pd.to_datetime(d_start).floor("D")
@@ -440,6 +450,15 @@ with st.spinner("Veriler yükleniyor…"):
         df = src[(src["date"] >= t0) & (src["date"] <= t1)].copy()
         if geoids_sel:
             df = df[df["geoid"].isin(geoids_sel)].copy()
+
+        # Eğer bu pencere için hiç kayıt yoksa → tüm günlük risk çıktısını kullan
+        if df.empty:
+            st.info(
+                "Seçilen tarih aralığı için kayıt bulunamadı; "
+                "en güncel günlük risk çıktısı gösteriliyor."
+            )
+            df = src.copy()
+
         view_df = df
         time_col = "date"
 
@@ -450,28 +469,24 @@ with st.spinner("Veriler yükleniyor…"):
         view_df_cells = view_df[~mask_city].copy()
 
         if len(view_df_cells):
-            # Temel GEOID bazlı risk ortalaması (Sadece hücreler, şehir geneli hariç)
+            # Temel GEOID bazlı risk ortalaması (sadece hücreler)
             agg = (
                 view_df_cells.groupby("geoid", as_index=False)["risk_score"]
                 .mean()
                 .rename(columns={"risk_score": "risk_mean"})
             )
         else:
-            # Her ihtimale karşı fallback
             view_df_cells = pd.DataFrame()
             agg = pd.DataFrame()
 
         # Opsiyonel kolonları GEOID bazında özetle (risk_prob, expected_crimes, top1_category vs.)
         def safe_mean(col_name: str):
-            if col_name in view_df_cells.columns and len(view_df_cells):
-                return (
-                    view_df_cells.groupby("geoid", as_index=False)[col_name]
-                    .mean()
-                )
+            if len(view_df_cells) and col_name in view_df_cells.columns:
+                return view_df_cells.groupby("geoid", as_index=False)[col_name].mean()
             return None
 
         def safe_first(col_name: str):
-            if col_name in view_df_cells.columns and len(view_df_cells):
+            if len(view_df_cells) and col_name in view_df_cells.columns:
                 tmp = (
                     view_df_cells.sort_values(time_col)
                     .groupby("geoid", as_index=False)[col_name]
@@ -535,7 +550,14 @@ st.subheader("🗺️ Harita — 5 seviye risk renklendirme")
 centroids = load_centroids_from_artifact()
 
 if centroids is None or len(centroids) == 0 or len(agg_sorted) == 0:
-    st.info("Centroid (geoid→lat/lon) veya risk verisi bulunamadı. Harita devre dışı.")
+    if len(view_df_city) and not len(agg_sorted):
+        st.info(
+            "Bu aralıkta sadece şehir geneli (GEOID=0) için risk üretilmiş; "
+            "hücre (GEOID) bazlı risk olmadığı için harita devre dışı."
+        )
+    else:
+        st.info("Centroid (geoid→lat/lon) veya hücre bazlı risk verisi bulunamadı. Harita devre dışı.")
+
 else:
     map_df = (
         agg_sorted.merge(centroids, on="geoid", how="left")
@@ -911,20 +933,6 @@ with tab3:
             use_container_width=True,
             height=420,
         )
-
-        st.markdown("---")
-        st.subheader("🔝 Top-K GEOID tablo & indir")
-
-        if len(topk):
-            st.dataframe(topk, use_container_width=True, height=320)
-            st.download_button(
-                "⬇️ CSV indir (Top-K)",
-                data=csv_bytes(topk),
-                file_name="risk_topk.csv",
-                mime="text/csv",
-            )
-        else:
-            st.caption("Top-K tablosu için yeterli veri yok.")
 
         st.markdown("---")
         st.subheader("🔝 Top-K GEOID tablo & indir")
