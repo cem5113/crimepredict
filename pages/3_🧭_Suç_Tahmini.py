@@ -367,6 +367,7 @@ def enrich_geojson_with_risk(gj: dict, agg_df: pd.DataFrame) -> dict:
 
         key = _digits11(raw)
         props["display_id"] = str(raw) if raw not in (None, "") else key
+        props["geoid_norm"] = key
 
         # Varsayılan boş değerler
         props.setdefault("risk_mean_txt", "")
@@ -730,7 +731,7 @@ else:
             "<br/><b>Ortalama risk skoru (0-1):</b> {risk_mean_txt}"
             "<br/><b>Beklenen toplam olay:</b> {expected_count_txt}"
             "<br/><b>En olası suç türü:</b> {top1_category}"
-            "<br/><br/><a href='?geo={display_id}' "
+            "<br/><br/><a href='?geo={geoid_norm}' "
             "style='color:#ffd;font-weight:bold;text-decoration:underline;'>"
             "Bu GEOID için detay aç</a>"
         ),
