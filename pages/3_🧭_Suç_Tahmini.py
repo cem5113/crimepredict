@@ -730,6 +730,9 @@ else:
             "<br/><b>Ortalama risk skoru (0-1):</b> {risk_mean_txt}"
             "<br/><b>Beklenen toplam olay:</b> {expected_count_txt}"
             "<br/><b>En olası suç türü:</b> {top1_category}"
+            "<br/><br/><a href='?geo={display_id}' "
+            "style='color:#ffd;font-weight:bold;text-decoration:underline;'>"
+            "Bu GEOID için detay aç</a>"
         ),
         "style": {"backgroundColor": "#262730", "color": "white"},
     }
@@ -772,6 +775,24 @@ c3.metric(
 def geoid_label(g: str) -> str:
     return "Şehir geneli (GEOID=0)" if str(g) == "0" else str(g)
 
+# URL'den GEOID parametresini okuyan yardımcı fonksiyon
+def get_geoid_from_url() -> str | None:
+    try:
+        # Yeni Streamlit sürümlerinde
+        qp = st.query_params
+    except Exception:
+        # Eski sürümler için
+        qp = st.experimental_get_query_params()
+    if not qp:
+        return None
+    # URL '?geo=06075010101' veya '?geo=06075010101&...' gibi olabilir
+    val = qp.get("geo") or qp.get("GEOID") or qp.get("geoid")
+    if val is None:
+        return None
+    if isinstance(val, list):
+        return str(val[0])
+    return str(val)
+
 # GEOID seçimi (detay sekmeleri için)
 options = []
 # Önce şehir geneli (varsa)
@@ -779,18 +800,24 @@ if len(view_df_city):
     options.append("0")
 # Sonra hücreler (harita/Top-K ile tutarlı)
 if len(view_df_cells):
-    options.extend(sorted(view_df_cells["geoid"].unique().tolist()))
+    options.extend(sorted(view_df_cells["geoid"].astype(str).unique().tolist()))
 
 if options:
+    # URL'den gelen (haritadan tıklanan) GEOID varsa onu default yap
+    geoid_from_url = get_geoid_from_url()
+    default_index = 0
+    if geoid_from_url and geoid_from_url in options:
+        default_index = options.index(geoid_from_url)
+
     selected_geoid = st.selectbox(
         "Detay göstermek için GEOID seç:",
         options=options,
-        index=0,
+        index=default_index,
         format_func=geoid_label,
     )
 else:
     selected_geoid = None
-
+    
 # Top-K her halükârda hesaplayalım (sadece hücreler üzerinden)
 topk = agg_sorted.head(top_k).copy() if len(agg_sorted) else pd.DataFrame()
 
