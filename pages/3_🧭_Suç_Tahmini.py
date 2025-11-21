@@ -4,6 +4,8 @@
 # Not: Harita için centroid yalnızca artifact içindeki adaylardan bulunur (upload yok).
 
 import os
+from streamlit_folium import st_folium
+import folium
 import io
 import json
 import posixpath
@@ -274,6 +276,14 @@ def normalize_daily_schema(df: pd.DataFrame) -> pd.DataFrame:
     df = df.dropna(subset=["date", "geoid"]).copy()
     return df
 
+def rgba_to_hex(rgba):
+    """[r,g,b,a] → '#rrggbb'"""
+    try:
+        r, g, b, _ = rgba
+        return "#{:02x}{:02x}{:02x}".format(int(r), int(g), int(b))
+    except Exception:
+        return "#dddddd"
+        
 # ------------------------------------------------------------
 # 🧩 GEOID normalizasyonu (harita için 11 haneli + şehir geneli = '0')
 # ------------------------------------------------------------
@@ -677,7 +687,7 @@ with st.expander("🔎 Artifact içindeki dosya isimleri (debug)", expanded=Fals
         st.error(f"Debug sırasında hata: {e}")
 
 # ------------------------------------------------------------
-# 🗺️ HARİTA — EN ÜSTE (GeoJSON tabanlı)
+# 🗺️ HARİTA — EN ÜSTE (Folium + tıklama ile GEOID seçimi)
 # ------------------------------------------------------------
 if len(agg):
     agg["risk_bucket"] = agg["risk_mean"].map(bucket_of)
@@ -688,6 +698,8 @@ else:
 st.subheader("🗺️ Harita — 5 seviye risk renklendirme")
 
 geojson = load_geojson()
+
+clicked_geoid = None  # haritada tıklanan GEOID
 
 if not len(agg_sorted):
     if len(view_df_city):
@@ -712,47 +724,69 @@ else:
         unsafe_allow_html=True,
     )
 
-    layer = pdk.Layer(
-        "GeoJsonLayer",
+    # --- Folium haritası
+    m = folium.Map(
+        location=[37.7749, -122.4194],
+        zoom_start=11,
+        tiles="cartodbpositron",
+        control_scale=True,
+    )
+
+    def style_fn(feature):
+        props = feature.get("properties", {})
+        rgba = props.get("fill_color", [220, 220, 220, 160])
+        return {
+            "fillColor": rgba_to_hex(rgba),
+            "color": "#505050",
+            "weight": 0.5,
+            "fillOpacity": float(rgba[3]) / 255.0 if len(rgba) == 4 else 0.6,
+        }
+
+    def highlight_fn(feature):
+        return {"weight": 2, "color": "#000000"}
+
+    tooltip = folium.GeoJsonTooltip(
+        fields=["display_id", "risk_bucket", "risk_mean_txt", "expected_count_txt", "top1_category"],
+        aliases=[
+            "GEOID:",
+            "Risk seviyesi:",
+            "Ortalama risk skoru (0–1):",
+            "Beklenen toplam olay:",
+            "En olası suç türü:",
+        ],
+        sticky=True,
+    )
+
+    folium.GeoJson(
         gj_enriched,
-        stroked=True,
-        get_line_color=[80, 80, 80],
-        line_width_min_pixels=0.5,
-        filled=True,
-        get_fill_color="properties.fill_color",
-        pickable=True,
-        opacity=0.65,
+        name="Risk",
+        style_function=style_fn,
+        highlight_function=highlight_fn,
+        tooltip=tooltip,
+    ).add_to(m)
+
+    # Streamlit içinde haritayı render et ve tıklanan feature'ı yakala
+    folium_ret = st_folium(
+        m,
+        width=None,
+        height=520,
+        returned_objects=["last_active_drawing"],
+        key="sutam_fr_map",
     )
 
-    tooltip = {
-        "html": (
-            "<b>GEOID:</b> {display_id}"
-            "<br/><b>Risk seviyesi:</b> {risk_bucket}"
-            "<br/><b>Ortalama risk skoru (0-1):</b> {risk_mean_txt}"
-            "<br/><b>Beklenen toplam olay:</b> {expected_count_txt}"
-            "<br/><b>En olası suç türü:</b> {top1_category}"
-            "<br/><br/><a href='?geo={geoid_norm}' "
-            "style='color:#ffd;font-weight:bold;text-decoration:underline;'>"
-            "Bu GEOID için detay aç</a>"
-        ),
-        "style": {"backgroundColor": "#262730", "color": "white"},
-    }
+    if folium_ret and folium_ret.get("last_active_drawing"):
+        props = folium_ret["last_active_drawing"].get("properties", {}) or {}
+        clicked_geoid = str(
+            props.get("geoid_norm")   # 👈 ÖNCE normalize edilmiş olan
+            or props.get("display_id")
+            or props.get("geoid")
+            or props.get("GEOID")
+            or ""
+        ).strip()
 
-    view_state = pdk.ViewState(
-        latitude=37.7749,
-        longitude=-122.4194,
-        zoom=10.5,
-    )
-
-    st.pydeck_chart(
-        pdk.Deck(
-            layers=[layer],
-            initial_view_state=view_state,
-            map_style="light",
-            tooltip=tooltip,
-        )
-    )
-
+        # tıklanan GEOID'i session_state'e yaz (diğer bileşenler kullanacak)
+        if clicked_geoid:
+            st.session_state["clicked_geoid_fr"] = clicked_geoid
 # ------------------------------------------------------------
 # 🧠 Özet kartlar
 # ------------------------------------------------------------
@@ -776,24 +810,6 @@ c3.metric(
 def geoid_label(g: str) -> str:
     return "Şehir geneli (GEOID=0)" if str(g) == "0" else str(g)
 
-# URL'den GEOID parametresini okuyan yardımcı fonksiyon
-def get_geoid_from_url() -> str | None:
-    try:
-        # Yeni Streamlit sürümlerinde
-        qp = st.query_params
-    except Exception:
-        # Eski sürümler için
-        qp = st.experimental_get_query_params()
-    if not qp:
-        return None
-    # URL '?geo=06075010101' veya '?geo=06075010101&...' gibi olabilir
-    val = qp.get("geo") or qp.get("GEOID") or qp.get("geoid")
-    if val is None:
-        return None
-    if isinstance(val, list):
-        return str(val[0])
-    return str(val)
-
 # GEOID seçimi (detay sekmeleri için)
 options = []
 # Önce şehir geneli (varsa)
@@ -804,11 +820,13 @@ if len(view_df_cells):
     options.extend(sorted(view_df_cells["geoid"].astype(str).unique().tolist()))
 
 if options:
-    # URL'den gelen (haritadan tıklanan) GEOID varsa onu default yap
-    geoid_from_url = get_geoid_from_url()
+    # 1) Haritada tıklanan GEOID varsa onu al
+    clicked_geoid = st.session_state.get("clicked_geoid_fr", clicked_geoid)
+
+    # 2) Geçerli bir seçenek değilse 0. index
     default_index = 0
-    if geoid_from_url and geoid_from_url in options:
-        default_index = options.index(geoid_from_url)
+    if clicked_geoid and clicked_geoid in options:
+        default_index = options.index(clicked_geoid)
 
     selected_geoid = st.selectbox(
         "Detay göstermek için GEOID seç:",
