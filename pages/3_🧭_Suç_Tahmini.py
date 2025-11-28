@@ -36,7 +36,7 @@ ARTIFACT_MEMBER_HOURLY = "risk_3h_next7d_top3"
 ARTIFACT_MEMBER_DAILY  = "risk_daily_next365d_top5"
 
 # 🔁 Yeni 3-saatlik CSV (FR style) için yerel yol
-CSV_HOURLY_FRSTYLE = "data/crime_forecast_7days_all_geoids_FRstyle.csv"
+CSV_HOURLY_FRSTYLE = "crime_forecast_7days_all_geoids_FRstyle.csv"
 
 # Yerel GeoJSON (2_🗺️_Risk_Haritası.py ile aynı)
 GEOJSON_LOCAL = "data/sf_cells.geojson"
