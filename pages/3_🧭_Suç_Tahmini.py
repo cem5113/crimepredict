@@ -565,10 +565,12 @@ def load_hourly_dataframe() -> pd.DataFrame:
     """
     # Önce yerel CSV'yi dene
     if os.path.exists(CSV_HOURLY_FRSTYLE):
+        st.sidebar.success("3-saatlik veri kaynağı: 🔹 Yerel CSV (FRstyle)")
         raw = pd.read_csv(CSV_HOURLY_FRSTYLE)
         return normalize_hourly_schema(raw)
 
     # CSV yoksa eski davranış: artifact'ten oku
+    st.sidebar.warning("3-saatlik veri kaynağı: 🪣 GitHub artifact (risk_3h_next7d_top3)")
     raw = load_artifact_member(ARTIFACT_MEMBER_HOURLY)
     return normalize_hourly_schema(raw)
 
@@ -638,31 +640,45 @@ with st.spinner("Veriler yükleniyor…"):
 
         if len(view_df_cells):
             # Harita için GEOID bazlı risk ortalaması (sadece hücreler)
-            # Tercihen risk_prob (0–1), yoksa risk_score'u akıllı şekilde kullan
+            # 1) Önce risk_prob'u dene
             metric_col = None
+            use_prob = False
+
             if "risk_prob" in view_df_cells.columns:
-                metric_col = "risk_prob"
-            elif "risk_score" in view_df_cells.columns:
+                max_prob = pd.to_numeric(
+                    view_df_cells["risk_prob"], errors="coerce"
+                ).max()
+                if pd.notna(max_prob) and max_prob > 0:
+                    metric_col = "risk_prob"
+                    use_prob = True
+
+            # 2) Eğer risk_prob yoksa veya hep 0'sa risk_score'a dön
+            if metric_col is None and "risk_score" in view_df_cells.columns:
                 metric_col = "risk_score"
-        
+                use_prob = False
+
             if metric_col is None:
                 agg = pd.DataFrame()
             else:
-                tmp = view_df_cells.groupby("geoid", as_index=False)[metric_col].mean()
-        
-                # risk_mean'i 0–1 aralığına sıkıştır
-                if metric_col == "risk_prob":
-                    tmp = tmp.rename(columns={"risk_prob": "risk_mean"})
+                tmp = view_df_cells.copy()
+                tmp[metric_col] = pd.to_numeric(tmp[metric_col], errors="coerce")
+
+                grp = tmp.groupby("geoid", as_index=False)[metric_col].mean()
+
+                if use_prob:
+                    grp = grp.rename(columns={metric_col: "risk_mean"})
                 else:
-                    # risk_score büyük olasılıkla % ise (max > 1), 100'e böl
-                    max_val = tmp[metric_col].max()
-                    if max_val is not None and max_val > 1.0:
-                        tmp["risk_mean"] = tmp[metric_col].clip(0, 100) / 100.0
+                    # risk_score büyük ihtimalle yüzde → 0–100'ü 0–1'e çevir
+                    max_val = grp[metric_col].max()
+                    if pd.notna(max_val) and max_val > 1.0:
+                        grp["risk_mean"] = grp[metric_col].clip(0, 100) / 100.0
                     else:
-                        tmp["risk_mean"] = tmp[metric_col].clip(0.0, 1.0)
-                    tmp = tmp[["geoid", "risk_mean"]]
-        
-                agg = tmp
+                        grp["risk_mean"] = grp[metric_col].clip(0.0, 1.0)
+
+                agg = grp[["geoid", "risk_mean"]]
+        else:
+            view_df_cells = pd.DataFrame()
+            agg = pd.DataFrame()
 
         # Opsiyonel kolonları GEOID bazında özetle (risk_prob, expected_crimes, top1_category vs.)
         def safe_mean(col_name: str):
@@ -876,6 +892,28 @@ else:
     
 # Top-K her halükârda hesaplayalım (sadece hücreler üzerinden)
 topk = agg_sorted.head(top_k).copy() if len(agg_sorted) else pd.DataFrame()
+
+# ------------------------------------------------------------
+# 🔍 Debug: Seçili GEOID için ham kayıtlar
+# ------------------------------------------------------------
+with st.expander("🔎 Debug: Seçili GEOID ham kayıtlar"):
+    if selected_geoid is not None and len(view_df):
+        df_dbg = (
+            view_df[view_df["geoid"] == selected_geoid]
+            [[time_col, "geoid", "risk_score"] + (
+                ["risk_prob"] if "risk_prob" in view_df.columns else []
+            )]
+            .sort_values(time_col)
+            .tail(10)
+        )
+        st.write(df_dbg)
+
+        if "risk_prob" in view_df.columns:
+            st.write(
+                "risk_prob min/max:",
+                float(pd.to_numeric(view_df["risk_prob"], errors="coerce").min()),
+                float(pd.to_numeric(view_df["risk_prob"], errors="coerce").max()),
+            )
 
 # ------------------------------------------------------------
 # 🔍 Sekmeli görünüm: Özet & nedenler / Zaman serisi / Isı haritası & Top-K
