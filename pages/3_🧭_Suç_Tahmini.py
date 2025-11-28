@@ -631,7 +631,7 @@ with st.spinner("Veriler yükleniyor…"):
 
         view_df = df
         time_col = "date"
-
+        
     if len(view_df):
         # GEOID=0 → şehir geneli, diğerleri hücreler
         mask_city = view_df["geoid"].astype(str) == "0"
@@ -675,7 +675,9 @@ with st.spinner("Veriler yükleniyor…"):
                     else:
                         grp["risk_mean"] = grp[metric_col].clip(0.0, 1.0)
 
-                agg = grp[["geoid", "risk_mean"]]
+                agg = grp[["geoid", "risk_mean"]].copy()
+                # GEOID'leri string olarak tut (GeoJSON'daki ile bire bir eşleşsin)
+                agg["geoid"] = agg["geoid"].astype(str)
         else:
             view_df_cells = pd.DataFrame()
             agg = pd.DataFrame()
@@ -683,7 +685,9 @@ with st.spinner("Veriler yükleniyor…"):
         # Opsiyonel kolonları GEOID bazında özetle (risk_prob, expected_crimes, top1_category vs.)
         def safe_mean(col_name: str):
             if len(view_df_cells) and col_name in view_df_cells.columns:
-                return view_df_cells.groupby("geoid", as_index=False)[col_name].mean()
+                out = view_df_cells.groupby("geoid", as_index=False)[col_name].mean()
+                out["geoid"] = out["geoid"].astype(str)
+                return out
             return None
 
         def safe_first(col_name: str):
@@ -693,18 +697,20 @@ with st.spinner("Veriler yükleniyor…"):
                     .groupby("geoid", as_index=False)[col_name]
                     .first()
                 )
+                tmp["geoid"] = tmp["geoid"].astype(str)
                 return tmp
             return None
 
-        for c in ["risk_prob", "expected_crimes", "expected_count"]:
-            tmp = safe_mean(c)
-            if tmp is not None and len(tmp):
-                agg = agg.merge(tmp, on="geoid", how="left")
+        if len(agg):
+            for c in ["risk_prob", "expected_crimes", "expected_count"]:
+                tmp = safe_mean(c)
+                if tmp is not None and len(tmp):
+                    agg = agg.merge(tmp, on="geoid", how="left")
 
-        for c in ["risk_level", "risk_decile", "top1_category"]:
-            tmp = safe_first(c)
-            if tmp is not None and len(tmp):
-                agg = agg.merge(tmp, on="geoid", how="left")
+            for c in ["risk_level", "risk_decile", "top1_category"]:
+                tmp = safe_first(c)
+                if tmp is not None and len(tmp):
+                    agg = agg.merge(tmp, on="geoid", how="left")
 
 # ------------------------------------------------------------
 # 🔎 DEBUG — Artifact ZIP içindeki dosya isimlerini göster
