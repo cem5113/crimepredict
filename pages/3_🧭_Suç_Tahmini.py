@@ -560,18 +560,38 @@ top_k = st.sidebar.slider("Top-K (tablo)", 10, 200, 50, step=10)
 def load_hourly_dataframe() -> pd.DataFrame:
     """
     3-saatlik blok veri kaynağı:
-      1) Eğer mevcutsa: data/crime_forecast_7days_all_geoids_FRstyle.csv
-      2) Değilse: artifact içindeki risk_3h_next7d_top3
+      - Her zaman FR-style CSV'yi kullan.
+      - Önce yerel dosyayı dene, yoksa GitHub 'crimepredict' reposundan indir.
     """
-    # Önce yerel CSV'yi dene
-    if os.path.exists(CSV_HOURLY_FRSTYLE):
-        st.sidebar.success("3-saatlik veri kaynağı: 🔹 Yerel CSV (FRstyle)")
-        raw = pd.read_csv(CSV_HOURLY_FRSTYLE)
-        return normalize_hourly_schema(raw)
+    # 1) Uygulama repo'sunda yerel dosya varsa onu kullan
+    local_candidates = [
+        "data/crime_forecast_7days_all_geoids_FRstyle.csv",
+        "crime_forecast_7days_all_geoids_FRstyle.csv",
+    ]
 
-    # CSV yoksa eski davranış: artifact'ten oku
-    st.sidebar.warning("3-saatlik veri kaynağı: 🪣 GitHub artifact (risk_3h_next7d_top3)")
-    raw = load_artifact_member(ARTIFACT_MEMBER_HOURLY)
+    for path in local_candidates:
+        if os.path.exists(path):
+            st.sidebar.success(
+                f"3-saatlik veri kaynağı: 🔹 Yerel CSV ({path})"
+            )
+            raw = pd.read_csv(path)
+            return normalize_hourly_schema(raw)
+
+    # 2) Yerel yoksa: GitHub 'crimepredict' reposundan raw CSV indir
+    csv_url = (
+        "https://raw.githubusercontent.com/"
+        "cem5113/crimepredict/main/crime_forecast_7days_all_geoids_FRstyle.csv"
+    )
+
+    st.sidebar.info(
+        "3-saatlik veri kaynağı: 🌐 GitHub → "
+        "cem5113/crimepredict / crime_forecast_7days_all_geoids_FRstyle.csv"
+    )
+
+    resp = requests.get(csv_url, timeout=60)
+    resp.raise_for_status()
+
+    raw = pd.read_csv(io.StringIO(resp.text))
     return normalize_hourly_schema(raw)
 
 @st.cache_data(show_spinner=False)
