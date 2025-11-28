@@ -637,15 +637,32 @@ with st.spinner("Veriler yükleniyor…"):
         view_df_cells = view_df[~mask_city].copy()
 
         if len(view_df_cells):
-            # Temel GEOID bazlı risk ortalaması (sadece hücreler)
-            agg = (
-                view_df_cells.groupby("geoid", as_index=False)["risk_score"]
-                .mean()
-                .rename(columns={"risk_score": "risk_mean"})
-            )
-        else:
-            view_df_cells = pd.DataFrame()
-            agg = pd.DataFrame()
+            # Harita için GEOID bazlı risk ortalaması (sadece hücreler)
+            # Tercihen risk_prob (0–1), yoksa risk_score'u akıllı şekilde kullan
+            metric_col = None
+            if "risk_prob" in view_df_cells.columns:
+                metric_col = "risk_prob"
+            elif "risk_score" in view_df_cells.columns:
+                metric_col = "risk_score"
+        
+            if metric_col is None:
+                agg = pd.DataFrame()
+            else:
+                tmp = view_df_cells.groupby("geoid", as_index=False)[metric_col].mean()
+        
+                # risk_mean'i 0–1 aralığına sıkıştır
+                if metric_col == "risk_prob":
+                    tmp = tmp.rename(columns={"risk_prob": "risk_mean"})
+                else:
+                    # risk_score büyük olasılıkla % ise (max > 1), 100'e böl
+                    max_val = tmp[metric_col].max()
+                    if max_val is not None and max_val > 1.0:
+                        tmp["risk_mean"] = tmp[metric_col].clip(0, 100) / 100.0
+                    else:
+                        tmp["risk_mean"] = tmp[metric_col].clip(0.0, 1.0)
+                    tmp = tmp[["geoid", "risk_mean"]]
+        
+                agg = tmp
 
         # Opsiyonel kolonları GEOID bazında özetle (risk_prob, expected_crimes, top1_category vs.)
         def safe_mean(col_name: str):
