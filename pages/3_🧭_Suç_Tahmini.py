@@ -1,5 +1,5 @@
-# 3_🧭_Suç_Tahmini — Haritalı görünüm (GEOID + centroid)
-# Saatlik (≤24 saat; tek saat / saat aralığı) ve Günlük (≤365 gün) risk görünümleri
+# 3_🧭_Suç_Tahmini — Haritalı görünüm (GEOID + centroid) 
+# 3 Saatlik Bloklar (≤7 gün; 3-saatlik aralık) ve Günlük (≤365 gün) risk görünümleri
 # Kaynak: artifact 'fr-crime-outputs-parquet' → risk_hourly_next24h_top3 / risk_daily_next365d_top5
 # Not: Harita için centroid yalnızca artifact içindeki adaylardan bulunur (upload yok).
 
@@ -34,6 +34,9 @@ ARTIFACT_NAME_SHOULD_CONTAIN = "fr-crime-outputs-parquet"  # FR risk çıktılar
 # Artifact içindeki beklenen dosyalar (FR pipeline risk çıktıları)
 ARTIFACT_MEMBER_HOURLY = "risk_3h_next7d_top3"
 ARTIFACT_MEMBER_DAILY  = "risk_daily_next365d_top5"
+
+# 🔁 Yeni 3-saatlik CSV (FR style) için yerel yol
+CSV_HOURLY_FRSTYLE = "data/crime_forecast_7days_all_geoids_FRstyle.csv"
 
 # Yerel GeoJSON (2_🗺️_Risk_Haritası.py ile aynı)
 GEOJSON_LOCAL = "data/sf_cells.geojson"
@@ -167,7 +170,8 @@ def load_artifact_member(member: str) -> pd.DataFrame:
 # ------------------------------------------------------------
 def normalize_hourly_schema(df: pd.DataFrame) -> pd.DataFrame:
     """
-    risk_3h_next7d_top3 için saatlik (3-saatlik blok) şema normalizasyonu.
+    risk_3h_next7d_top3 veya crime_forecast_7days_all_geoids_FRstyle.csv için
+    saatlik (3-saatlik blok) şema normalizasyonu.
 
     Desteklenen kolonlar:
       - date
@@ -458,7 +462,11 @@ st.set_page_config(page_title="🌀 Suç Tahmini", layout="wide")
 st.sidebar.header("⚙️ Ayarlar")
 
 # Zaman modu
-mode = st.sidebar.radio("Zaman çözünürlüğü", ["Saatlik (≤7 gün)", "Günlük (≤365 gün)"], index=0)
+mode = st.sidebar.radio(
+    "Zaman çözünürlüğü",
+    ["3 Saatlik Bloklar (≤7 gün)", "Günlük (≤365 gün)"],
+    index=0,
+)
 
 # Saatlik modda SADECE saat aralığı seçimi
 def default_hour_block_label(hour_blocks: dict) -> str:
@@ -479,7 +487,7 @@ def default_hour_block_label(hour_blocks: dict) -> str:
     except Exception:
         return fallback
 
-if mode.startswith("Saatlik"):
+if mode.startswith("3 Saatlik"):
     st.sidebar.subheader("Saat Aralığı")
 
     # 3 saatlik bloklar
@@ -514,15 +522,15 @@ else:
     # Fallback: UTC / sistem zamanı
     now_sf = datetime.utcnow()
 
-max_days = 7 if mode.startswith("Saatlik") else 365
+max_days = 7 if mode.startswith("3 Saatlik") else 365
 st.sidebar.caption(
-    f"{'Saatlik' if max_days == 7 else 'Günlük'} görünümde en fazla {max_days} gün seçebilirsiniz. "
+    f"{'3 Saatlik' if max_days == 7 else 'Günlük'} görünümde en fazla {max_days} gün seçebilirsiniz. "
     "(San Francisco yerel zamanı baz alınır.)"
 )
 
 # 🔁 MOD: Saatlik ve Günlük mod için farklı varsayılan tarih aralığı
-if mode.startswith("Saatlik"):
-    # Saatlik görünüm: SF bugün (sadece bugünün blokları)
+if mode.startswith("3 Saatlik"):
+    # 3 Saatlik görünüm: SF bugün (sadece bugünün blokları)
     d_start_default = now_sf.date()
     d_end_default   = now_sf.date()
 else:
@@ -550,6 +558,17 @@ top_k = st.sidebar.slider("Top-K (tablo)", 10, 200, 50, step=10)
 # ------------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def load_hourly_dataframe() -> pd.DataFrame:
+    """
+    3-saatlik blok veri kaynağı:
+      1) Eğer mevcutsa: data/crime_forecast_7days_all_geoids_FRstyle.csv
+      2) Değilse: artifact içindeki risk_3h_next7d_top3
+    """
+    # Önce yerel CSV'yi dene
+    if os.path.exists(CSV_HOURLY_FRSTYLE):
+        raw = pd.read_csv(CSV_HOURLY_FRSTYLE)
+        return normalize_hourly_schema(raw)
+
+    # CSV yoksa eski davranış: artifact'ten oku
     raw = load_artifact_member(ARTIFACT_MEMBER_HOURLY)
     return normalize_hourly_schema(raw)
 
@@ -565,7 +584,7 @@ view_df_cells = pd.DataFrame()  # geoid != "0" (hücreler)
 time_col = "timestamp"
 
 with st.spinner("Veriler yükleniyor…"):
-    if mode.startswith("Saatlik"):
+    if mode.startswith("3 Saatlik"):
         src = load_hourly_dataframe()
         # 🔁 GEOID formatını harita için normalize et
         src = normalize_geoid_for_map(src)
@@ -744,7 +763,7 @@ else:
 
     def highlight_fn(feature):
         return {"weight": 2, "color": "#000000"}
-
+    
     tooltip = folium.GeoJsonTooltip(
         fields=["display_id", "risk_bucket", "risk_mean_txt", "expected_count_txt", "top1_category"],
         aliases=[
@@ -787,12 +806,13 @@ else:
         # tıklanan GEOID'i session_state'e yaz (diğer bileşenler kullanacak)
         if clicked_geoid:
             st.session_state["clicked_geoid_fr"] = clicked_geoid
+
 # ------------------------------------------------------------
 # 🧠 Özet kartlar
 # ------------------------------------------------------------
 st.title("🌀 Suç Tahmini — Haritalı GEOID görünüm")
 st.caption(
-    "Saatlik (tek saat / saat aralığı, ≤7 gün) veya günlük (≤365 gün) pencerede GEOID bazlı ortalama risk."
+    "3-saatlik bloklar (≤7 gün) veya günlük (≤365 gün) pencerede GEOID bazlı ortalama risk."
 )
 
 c1, c2, c3 = st.columns(3)
@@ -870,7 +890,7 @@ with tab1:
                     # Bugün yoksa, eski davranış: en son satır
                     latest = df_sel.iloc[-1]
             else:
-                # Saatlik modda olduğu gibi son satırı kullan
+                # 3-saatlik modda olduğu gibi son satırı kullan
                 latest = df_sel.iloc[-1]
         
             def gv(col, default="—"):
@@ -1018,7 +1038,7 @@ with tab1:
 
             # Top1–Top5 ve pay/olasılık/expected sütunlarını derle
             rows = []
-            for k in range(1, 6):
+            for k in range(1, 5+1):
                 cat_col = f"top{k}_category"
                 share_col = f"top{k}_share"
                 prob_col = f"top{k}_prob"
@@ -1111,7 +1131,7 @@ with tab3:
     if len(view_df) == 0:
         st.info("Seçilen aralık için veri yok.")
     else:
-        heat_index = "hour" if mode.startswith("Saatlik") else "date"
+        heat_index = "hour" if mode.startswith("3 Saatlik") else "date"
         heat = (
             view_df.groupby([heat_index, "geoid"], as_index=False)["risk_score"]
             .mean()
@@ -1145,7 +1165,7 @@ with tab3:
 # ------------------------------------------------------------
 st.caption(
     "Kaynak: artifact 'fr-crime-outputs-parquet' → "
-    "risk_3h_next7d_top3 / risk_daily_next365d_top5 (parquet veya csv). "
+    "risk_3h_next7d_top3 / risk_daily_next365d_top5 (parquet veya csv); "
+    "veya yerel CSV: 'data/crime_forecast_7days_all_geoids_FRstyle.csv'. "
     "Harita geometri kaynağı: repo içindeki 'data/sf_cells.geojson' dosyası."
 )
-
