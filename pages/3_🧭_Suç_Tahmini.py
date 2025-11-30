@@ -29,7 +29,7 @@ import pydeck as pdk
 # ------------------------------------------------------------
 REPOSITORY_OWNER = "cem5113"
 REPOSITORY_NAME  = "crime_prediction_data"
-ARTIFACT_NAME_SHOULD_CONTAIN = "fr-crime-outputs-parquet"  # FR risk çıktıları artifact'i
+ARTIFACT_NAME_SHOULD_CONTAIN = "sf-crime-outputs-parquet"  # FR risk çıktıları artifact'i
 
 # Artifact içindeki beklenen dosyalar (FR pipeline risk çıktıları)
 ARTIFACT_MEMBER_HOURLY = "risk_3h_next7d_top3"
